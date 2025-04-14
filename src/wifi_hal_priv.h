@@ -437,7 +437,7 @@ typedef struct wifi_interface_info_t {
 #ifdef CONFIG_IEEE80211BE
 #ifndef CONFIG_DRIVER_BRCM
     struct wifi_interface_info_t *links[MAX_NUM_MLD_LINKS];
-    struct wifi_interface_info_t *flink;
+    // struct wifi_interface_info_t *flink;
     u16 valid_links;
 #endif /* CONFIG_DRIVER_BRCM */
 #endif /* CONFIG_IEEE80211BE */

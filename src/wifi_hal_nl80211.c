@@ -147,7 +147,7 @@ static struct wifi_interface_info_t *nl80211_get_link_interface(wifi_interface_i
             return interface->links[link_id];
         }
     }
-    interface = (interface->flink ? interface->flink : interface);
+    // interface = (interface->flink ? interface->flink : interface);
 #endif /* CONFIG_DRIVER_BRCM */
 #endif /* CONFIG_IEEE80211BE */
 #endif /* HOSTAPD_VERSION >= 211 */
@@ -221,10 +221,10 @@ static int wifi_drv_link_add(void *priv, u8 link_id, const u8 *addr, void *bss_c
 
     interface->links[link_id] = (wifi_interface_info_t *)bss_ctx;
 
-    /* The new link is the first one, make it the default */
-    if (!interface->valid_links) {
-        interface->flink = interface->links[link_id];
-    }
+    // /* The new link is the first one, make it the default */
+    // if (!interface->valid_links) {
+    //     interface->flink = interface->links[link_id];
+    // }
 
     interface->valid_links |= BIT(link_id);
 
@@ -236,9 +236,9 @@ static int wifi_drv_link_add(void *priv, u8 link_id, const u8 *addr, void *bss_c
 
 static int nl80211_drv_remove_link(wifi_interface_info_t *interface, int link_id)
 {
-    wifi_interface_info_t *link_interface;
+    // wifi_interface_info_t *link_interface;
     struct nl_msg *msg;
-    size_t i;
+    // size_t i;
     int ret;
 
     wifi_hal_info_print("%s:%d: nl80211: Remove link (ifindex=%d link_id=%u)", __func__, __LINE__,
@@ -249,25 +249,27 @@ static int nl80211_drv_remove_link(wifi_interface_info_t *interface, int link_id
         return -1;
     }
 
-    link_interface = interface->links[link_id];
+    // link_interface = interface->links[link_id];
 
     nl80211_del_beacon(interface, link_id);
 
     /* First remove the link locally */
     interface->valid_links &= ~BIT(link_id);
 
-    /* Choose new deflink if we are removing that link */
-    if (interface->flink == link_interface) {
-        for_each_link_default(interface->valid_links, i, 0) {
-            interface->flink = interface->links[i];
-            break;
-        }
-    }
+    //!FIXME: remove flink. The upper layer should know how to recreate mlo unit if we remove main ap.
 
-    /* If this was the last link, reset default link */
-    if (!interface->valid_links) {
-        interface->flink = NULL;
-    }
+    // /* Choose new deflink if we are removing that link */
+    // if (interface->flink == link_interface) {
+    //     for_each_link_default(interface->valid_links, i, 0) {
+    //         interface->flink = interface->links[i];
+    //         break;
+    //     }
+    // }
+
+    // /* If this was the last link, reset default link */
+    // if (!interface->valid_links) {
+    //     interface->flink = NULL;
+    // }
 
     /* Remove the link from the kernel */
     msg = nl80211_drv_cmd_msg(g_wifi_hal.nl80211_id, NULL, 0, NL80211_CMD_REMOVE_LINK);
@@ -6700,8 +6702,8 @@ static int nl80211_del_beacon(wifi_interface_info_t *interface, int link_id)
     wifi_interface_info_t *link_interface;
 
     link_interface = nl80211_get_link_interface(interface, link_id);
-    wifi_hal_dbg_print("%s:%d nl80211: MLD: stop beaconing on link=%d", __func__, __LINE__,
-        link_id);
+    wifi_hal_dbg_print("%s:%d nl80211: MLD: stop beaconing on interface=%d,link=%d", __func__,
+        __LINE__, interface->index, link_id);
 
     if (!link_interface->beacon_set) {
         return 0;
@@ -6728,10 +6730,8 @@ static int nl80211_del_beacon(wifi_interface_info_t *interface, int link_id)
     return nl80211_send_and_recv(msg, &ap_enable_handler, &g_wifi_hal, NULL, NULL);
 }
 
-//!FIXME: remove it
 int nl80211_enable_ap(wifi_interface_info_t *interface, bool enable)
 {
-    struct nl_msg *msg;
     int ret;
 
     if (enable) {
@@ -6739,25 +6739,9 @@ int nl80211_enable_ap(wifi_interface_info_t *interface, bool enable)
         ieee802_11_update_beacons(interface->u.ap.hapd.iface);
         pthread_mutex_unlock(&g_wifi_hal.hapd_lock);
         return RETURN_OK;
-    } else {
-        interface->beacon_set = 0;
-        msg = nl80211_drv_cmd_msg(g_wifi_hal.nl80211_id, NULL, 0, NL80211_CMD_STOP_AP);
     }
 
-    if (msg == NULL) {
-        return -1;
-    }
-
-
-    if (nla_put_u32(msg, NL80211_ATTR_IFINDEX, interface->index) < 0) {
-        nlmsg_free(msg);
-        return -1;
-    }
-
-
-    wifi_hal_dbg_print("%s:%d: %s ap on interface: %d\n", __func__, __LINE__,
-        enable ? "Starting" : "Stopping", interface->index);
-    if ((ret = nl80211_send_and_recv(msg, ap_enable_handler, &g_wifi_hal, NULL, NULL))) {
+    if ((ret = nl80211_del_beacon(interface->u.ap.hapd.drv_priv, interface->u.ap.hapd.mld_link_id))) {
         wifi_hal_error_print("%s:%d: Error stopping/starting ap: %d (%s) \n", __func__, __LINE__, ret, strerror(-ret));
         return RETURN_ERR;
     }
