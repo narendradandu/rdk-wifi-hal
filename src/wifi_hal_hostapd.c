@@ -1720,6 +1720,26 @@ int update_hostap_iface(wifi_interface_info_t *interface)
     return RETURN_OK;
 }
 
+static int hostapd_for_each_interface_adapter(struct hapd_interfaces *interfaces,
+    int (*cb)(struct hostapd_iface *iface, void *ctx), void *ctx)
+{
+    wifi_radio_info_t *radio;
+    unsigned int i;
+    int ret;
+
+    for (i = 0; i < g_wifi_hal.num_radios; i++) {
+        radio = &g_wifi_hal.radio_info[i];
+
+        interfaces = &radio->interfaces;
+        ret = hostapd_for_each_interface(interfaces, cb, ctx);
+        if (ret != 0) {
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
 int update_hostap_interfaces(wifi_radio_info_t *radio)
 {
     struct hapd_interfaces *interfaces;
@@ -1733,7 +1753,7 @@ int update_hostap_interfaces(wifi_radio_info_t *radio)
     }
 
     interfaces = &radio->interfaces;
-    interfaces->for_each_interface = hostapd_for_each_interface;
+    interfaces->for_each_interface = hostapd_for_each_interface_adapter;
     interfaces->iface = radio->iface;
 
     pthread_mutex_lock(&g_wifi_hal.hapd_lock);
@@ -2116,11 +2136,10 @@ int update_hostap_config_params(wifi_radio_info_t *radio)
     return RETURN_OK;
 }
 
-int update_hostap_interface_params(wifi_interface_info_t *interface)
+int update_hostap_interface_params_v2(wifi_interface_info_t *interface, unsigned char update_mlo)
 {
     int ret = RETURN_ERR;
 
-    pthread_mutex_lock(&g_wifi_hal.hapd_lock);
     // initialize the default params
     if (update_hostap_data(interface) != RETURN_OK) {
         goto exit;
@@ -2144,13 +2163,21 @@ int update_hostap_interface_params(wifi_interface_info_t *interface)
         goto exit;
     }
 #ifdef CONFIG_IEEE80211BE
-    if (update_hostap_mlo(interface) != RETURN_OK) {
+    if (update_mlo && update_hostap_mlo(interface) != RETURN_OK) {
         goto exit;
     }
 #endif /* CONFIG_IEEE80211BE */
 
     ret = RETURN_OK;
 exit:
+    return ret;
+}
+
+int update_hostap_interface_params(wifi_interface_info_t *interface)
+{
+    int ret;
+    pthread_mutex_lock(&g_wifi_hal.hapd_lock);
+    ret = update_hostap_interface_params_v2(interface, 1);
     pthread_mutex_unlock(&g_wifi_hal.hapd_lock);
     return ret;
 }

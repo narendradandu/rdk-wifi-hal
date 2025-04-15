@@ -40,6 +40,8 @@ static struct hostapd_mld MLD_UNIT[] = {
 };
 
 extern void hostapd_bss_link_deinit(struct hostapd_data *hapd);
+extern int update_hostap_interface_params_v2(wifi_interface_info_t *interface,
+    unsigned char update_mlo);
 
 int platform_get_link_id_for_radio_index(wifi_radio_index_t index)
 {
@@ -66,11 +68,14 @@ int platform_get_link_id_for_radio_index(wifi_radio_index_t index)
     return link_id;
 }
 
+int update_hostap_mlo(wifi_interface_info_t *interface)
+{
     struct hostapd_bss_config *conf;
     struct hostapd_data *hapd;
     wifi_vap_info_t *vap;
     int link_id;
     int mld_ap;
+    int res = 0;
 
     conf = &interface->u.ap.conf;
     hapd = &interface->u.ap.hapd;
@@ -133,7 +138,7 @@ int platform_get_link_id_for_radio_index(wifi_radio_index_t index)
                     if (bss == hapd) {
                         continue;
                     }
-                    bss_list[i] = bss;
+                    bss_list[i++] = bss;
 
                     hostapd_bss_deinit_no_free(bss);
                     hostapd_bss_link_deinit(bss);
@@ -144,44 +149,54 @@ int platform_get_link_id_for_radio_index(wifi_radio_index_t index)
                 hostapd_bss_link_deinit(hapd);
 
                 for (i = 0; i < bss_list_len; i++) {
-                    if (update_hostap_data((wifi_interface_info_t *)bss_list[i]) != RETURN_OK) {
-                        // goto exit;
-                    }
-                    extern int update_hostap_bss(wifi_interface_info_t * interface);
-                    if (update_hostap_bss((wifi_interface_info_t *)bss_list[i]) != RETURN_OK) {
-#ifdef CONFIG_SAE
-                        if (interface->u.ap.conf.sae_groups) {
-                            os_free(interface->u.ap.conf.sae_groups);
-                            interface->u.ap.conf.sae_groups = NULL;
-                        }
-#endif
-                        // goto exit;
-                    }
-                    if (update_hostap_iface((wifi_interface_info_t *)bss_list[i]) != RETURN_OK) {
-#ifdef CONFIG_SAE
-                        if (interface->u.ap.conf.sae_groups) {
-                            os_free(interface->u.ap.conf.sae_groups);
-                            interface->u.ap.conf.sae_groups = NULL;
-                        }
-#endif
+                    struct hostapd_bss_config *h_conf;
+                    struct hostapd_data *h_hapd;
+                    wifi_vap_info_t *h_vap;
+                    wifi_interface_info_t *h_interface;
+
+                    h_interface = (wifi_interface_info_t *)bss_list[i];
+                    h_conf = &h_interface->u.ap.conf;
+                    h_hapd = &h_interface->u.ap.hapd;
+                    h_vap = &h_interface->vap_info;
+
+                    res = update_hostap_interface_params_v2(h_interface, 0);
+                    if(res < 0) {
+                        wifi_hal_error_print("%s:%d: interface:%s failed to update hostapd params",
+                            __func__, __LINE__, h_interface->name);
+                        break;
                     }
 
-                    conf->mld_ap = mld_ap;
-                    hapd->mld_link_id = link_id;
+                    h_hapd->mld_link_id = platform_get_link_id_for_radio_index(h_vap->radio_index);
+                    h_conf->mld_ap = (!h_conf->disable_11be && (h_hapd->mld_link_id < MAX_NUM_MLD_LINKS));
+    
+                    h_conf->okc = h_conf->mld_ap;
 
-                    hostapd_setup_bss(bss_list[i], 0, true);
+                    h_interface->beacon_set = 0;
+                    res = hostapd_setup_bss(bss_list[i], 0, true);
+                    if(res < 0) {
+                        wifi_hal_error_print("%s:%d: interface:%s failed to setup bss", __func__,
+                            __LINE__, h_interface->name);
+                        break;
+                    }
                 }
                 free(bss_list);
             } else {
                 hostapd_if_link_remove(hapd, WPA_IF_AP_BSS, hapd->conf->iface, hapd->mld_link_id);
                 hostapd_bss_link_deinit(hapd);
-
-                conf->mld_ap = mld_ap;
-                hapd->mld_link_id = link_id;
             }
+
+            conf->mld_ap = mld_ap;
+            hapd->mld_link_id = link_id;
         }
     }
 
+    return res;
+}
+
+int wifi_drv_set_ap_mlo(struct nl_msg *msg, void *priv, struct wpa_driver_ap_params *params)
+{
+    return 0;
+}
 
 #endif /* CONFIG_IEEE80211BE */
 
