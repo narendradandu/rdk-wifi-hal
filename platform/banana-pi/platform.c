@@ -85,7 +85,7 @@ int update_hostap_mlo(wifi_interface_info_t *interface)
     mld_ap = (!conf->disable_11be && (link_id < MAX_NUM_MLD_LINKS));
 
     if (!is_wifi_hal_vap_private(vap->vap_index)) {
-        wifi_hal_dbg_print("%s:%d skip MLO for Non-Private VAP:%s", __func__, __LINE__,
+        wifi_hal_dbg_print("%s:%d skip MLO for Non-Private VAP:%s\n", __func__, __LINE__,
             conf->iface);
         mld_ap = 0;
     }
@@ -104,20 +104,20 @@ int update_hostap_mlo(wifi_interface_info_t *interface)
             h_hapd = hostapd_mld_get_first_bss(hapd);
             if (h_hapd) {
                 hapd->drv_priv = h_hapd->drv_priv;
-                wifi_hal_dbg_print("%s:%d: Setup of non first link (%d) BSS of MLD %s", __func__,
+                wifi_hal_dbg_print("%s:%d: Setup of non first link (%d) BSS of MLD %s\n", __func__,
                     __LINE__, hapd->mld_link_id, hapd->conf->iface);
             } else {
-                wifi_hal_dbg_print("%s:%d: Setup of first link (%d) BSS of MLD %s", __func__,
+                wifi_hal_dbg_print("%s:%d: Setup of first link (%d) BSS of MLD %s\n", __func__,
                     __LINE__, hapd->mld_link_id, hapd->conf->iface);
                 os_memcpy(hapd->mld->mld_addr, hapd->own_addr, ETH_ALEN);
             }
 
-            wifi_hal_dbg_print("%s:%d: MLD: Set link_id=%u, mld_addr=" MACSTR ", own_addr=" MACSTR,
+            wifi_hal_dbg_print("%s:%d: MLD: Set link_id=%u, mld_addr=" MACSTR ", own_addr=" MACSTR "\n",
                 __func__, __LINE__, hapd->mld_link_id, MAC2STR(hapd->mld->mld_addr),
                 MAC2STR(hapd->own_addr));
 
             if (hostapd_drv_link_add(hapd, hapd->mld_link_id, hapd->own_addr)) {
-                wifi_hal_error_print("%s:%d: MLD: Failed to add link %d in MLD %s", __func__,
+                wifi_hal_error_print("%s:%d: MLD: Failed to add link %d in MLD %s\n", __func__,
                     __LINE__, hapd->mld_link_id, hapd->conf->iface);
                 return -1;
             }
@@ -161,7 +161,7 @@ int update_hostap_mlo(wifi_interface_info_t *interface)
 
                     res = update_hostap_interface_params_v2(h_interface, 0);
                     if(res < 0) {
-                        wifi_hal_error_print("%s:%d: interface:%s failed to update hostapd params",
+                        wifi_hal_error_print("%s:%d: interface:%s failed to update hostapd params\n",
                             __func__, __LINE__, h_interface->name);
                         break;
                     }
@@ -174,7 +174,7 @@ int update_hostap_mlo(wifi_interface_info_t *interface)
                     h_interface->beacon_set = 0;
                     res = hostapd_setup_bss(bss_list[i], 0, true);
                     if(res < 0) {
-                        wifi_hal_error_print("%s:%d: interface:%s failed to setup bss", __func__,
+                        wifi_hal_error_print("%s:%d: interface:%s failed to setup bss\n", __func__,
                             __LINE__, h_interface->name);
                         break;
                     }
@@ -196,6 +196,16 @@ int update_hostap_mlo(wifi_interface_info_t *interface)
 int wifi_drv_set_ap_mlo(struct nl_msg *msg, void *priv, struct wpa_driver_ap_params *params)
 {
     return 0;
+}
+
+void wifi_drv_get_phy_eht_cap_mac(struct eht_capabilities *eht_capab, struct nlattr **tb) {
+    if (tb[NL80211_BAND_IFTYPE_ATTR_EHT_CAP_MAC] &&
+        nla_len(tb[NL80211_BAND_IFTYPE_ATTR_EHT_CAP_MAC]) >= 2) {
+        const u8 *pos;
+
+        pos = nla_data(tb[NL80211_BAND_IFTYPE_ATTR_EHT_CAP_MAC]);
+        eht_capab->mac_cap = WPA_GET_LE16(pos);
+    }
 }
 
 #endif /* CONFIG_IEEE80211BE */

@@ -178,22 +178,22 @@ static int wifi_drv_link_add(void *priv, u8 link_id, const u8 *addr, void *bss_c
 
     interface = (wifi_interface_info_t *)priv;
 
-    wifi_hal_dbg_print("%s:%d nl80211: MLD: add link_id=%u, addr=" MACSTR, __func__, __LINE__,
+    wifi_hal_dbg_print("%s:%d nl80211: MLD: add link_id=%u, addr=" MACSTR "\n", __func__, __LINE__,
         link_id, MAC2STR(addr));
 
     if (interface->type != NL80211_IFTYPE_AP) {
-        wifi_hal_error_print("%s:%d nl80211: MLD: cannot add link to iftype=%u", __func__, __LINE__,
+        wifi_hal_error_print("%s:%d nl80211: MLD: cannot add link to iftype=%u\n", __func__, __LINE__,
             interface->type);
         return -EINVAL;
     }
 
     if (link_id >= MAX_NUM_MLD_LINKS) {
-        wifi_hal_error_print("%s:%d nl80211: invalid link_id=%u", __func__, __LINE__, link_id);
+        wifi_hal_error_print("%s:%d nl80211: invalid link_id=%u\n", __func__, __LINE__, link_id);
         return -EINVAL;
     }
 
     if (interface->valid_links & BIT(link_id)) {
-        wifi_hal_dbg_print("%s:%d nl80211: MLD: Link %u already set", __func__, __LINE__,
+        wifi_hal_dbg_print("%s:%d nl80211: MLD: Link %u already set\n", __func__, __LINE__,
             link_id);
         return -EINVAL;
     }
@@ -201,7 +201,7 @@ static int wifi_drv_link_add(void *priv, u8 link_id, const u8 *addr, void *bss_c
     if (!interface->valid_links) {
         /* Becoming MLD, verify we were not beaconing */
         if (interface->beacon_set) {
-            wifi_hal_error_print("%s:%d nl80211: BSS already beaconing", __func__, __LINE__);
+            wifi_hal_error_print("%s:%d nl80211: BSS already beaconing\n", __func__, __LINE__);
             return -EINVAL;
         }
     }
@@ -229,7 +229,7 @@ static int wifi_drv_link_add(void *priv, u8 link_id, const u8 *addr, void *bss_c
 
     interface->valid_links |= BIT(link_id);
 
-    wifi_hal_info_print("%s:%d nl80211: MLD: valid_links=0x%04x on %s", __func__, __LINE__,
+    wifi_hal_info_print("%s:%d nl80211: MLD: valid_links=0x%04x on %s\n", __func__, __LINE__,
         interface->valid_links, interface->name);
 
     return 0;
@@ -6725,7 +6725,7 @@ static int nl80211_del_beacon(wifi_interface_info_t *interface, int link_id)
     wifi_interface_info_t *link_interface;
 
     link_interface = nl80211_get_link_interface(interface, link_id);
-    wifi_hal_dbg_print("%s:%d nl80211: MLD: stop beaconing on interface=%d,link=%d", __func__,
+    wifi_hal_dbg_print("%s:%d nl80211: MLD: stop beaconing on interface=%d,link=%d\n", __func__,
         __LINE__, interface->index, link_id);
 
     if (!link_interface->beacon_set) {
@@ -6756,6 +6756,7 @@ static int nl80211_del_beacon(wifi_interface_info_t *interface, int link_id)
 int nl80211_enable_ap(wifi_interface_info_t *interface, bool enable)
 {
     int ret;
+    int link_id = -1;
 
     if (enable) {
         pthread_mutex_lock(&g_wifi_hal.hapd_lock);
@@ -6764,8 +6765,23 @@ int nl80211_enable_ap(wifi_interface_info_t *interface, bool enable)
         return RETURN_OK;
     }
 
-    if ((ret = nl80211_del_beacon(interface->u.ap.hapd.drv_priv, interface->u.ap.hapd.mld_link_id))) {
-        wifi_hal_error_print("%s:%d: Error stopping/starting ap: %d (%s) \n", __func__, __LINE__, ret, strerror(-ret));
+#if HOSTAPD_VERSION >= 211
+#ifdef CONFIG_IEEE80211BE
+#ifndef CONFIG_DRIVER_BRCM
+    if(interface->u.ap.hapd.drv_priv != NULL) {
+        interface = interface->u.ap.hapd.drv_priv;
+
+        if(interface->u.ap.hapd.conf->mld_ap) {
+            link_id = interface->u.ap.hapd.mld_link_id;
+        }
+    }
+#endif /* CONFIG_DRIVER_BRCM */
+#endif /* CONFIG_IEEE80211BE */
+#endif /* HOSTAPD_VERSION >= 211 */
+
+    if ((ret = nl80211_del_beacon(interface, link_id))) {
+        wifi_hal_error_print("%s:%d: Error stopping/starting ap: %d (%s) \n", __func__, __LINE__,
+            ret, strerror(-ret));
         return RETURN_ERR;
     }
 
@@ -7104,7 +7120,7 @@ static int nl80211_fill_chandef(struct nl_msg *msg, wifi_radio_info_t *radio, wi
     nla_put_u32(msg, NL80211_ATTR_CENTER_FREQ2, 0);
     nla_put_u32(msg, NL80211_ATTR_CHANNEL_WIDTH, width);
 
-    wifi_hal_dbg_print("%s:%d Setting channel freq:%d freq1:%d width:%d on interface:%d\n", __func__, __LINE__, freq, freq1, width, interface->index);
+    wifi_hal_dbg_print("%s:%d Setting channel freq:%d freq1:%d width:%d on interface:%s\n", __func__, __LINE__, freq, freq1, width, interface->name);
     return 0;
 }
 
@@ -10851,7 +10867,7 @@ static int nl80211_set_channel(wifi_interface_info_t *interface,
     int ret;
 
     wifi_hal_info_print("nl80211: Set freq %d (ht_enabled=%d vht_enabled=%d, he_enabled=%d, bandwidth=%d MHz, " \
-           "cf1=%d MHz, cf2=%d MHz)", freq->freq, freq->ht_enabled, freq->vht_enabled, freq->he_enabled, freq->bandwidth,
+           "cf1=%d MHz, cf2=%d MHz)\n", freq->freq, freq->ht_enabled, freq->vht_enabled, freq->he_enabled, freq->bandwidth,
            freq->center_freq1, freq->center_freq2);
 
     msg = nl80211_drv_cmd_msg(g_wifi_hal.nl80211_id, interface, 0, set_chan ? NL80211_CMD_SET_CHANNEL : NL80211_CMD_SET_WIPHY);
@@ -10865,15 +10881,15 @@ static int nl80211_set_channel(wifi_interface_info_t *interface,
 #ifdef CONFIG_IEEE80211BE
 #ifndef CONFIG_DRIVER_BRCM
     if (nl80211_link_valid(interface->valid_links, freq->link_id)) {
-        wifi_hal_dbg_print("%s:%d nl80211: Set link_id=%u for freq", __func__, __LINE__,
+        wifi_hal_dbg_print("%s:%d nl80211: Set link_id=%u for freq\n", __func__, __LINE__,
             freq->link_id);
 
         if (nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID, freq->link_id) < 0) {
             nlmsg_free(msg);
             return -ENOBUFS;
         }
+        link_id = freq->link_id;
     }
-    link_id = freq->link_id;
 #endif /* CONFIG_DRIVER_BRCM */
 #endif /* CONFIG_IEEE80211BE */
 #endif /* HOSTAPD_VERSION >= 211 */
@@ -13605,7 +13621,7 @@ static int nl80211_set_bss(wifi_interface_info_t *interface, int cts, int preamb
     return nl80211_send_and_recv(msg, NULL, &g_wifi_hal, NULL, NULL);
 }
 
-int set_bss_param(void *priv, struct wpa_driver_ap_params *params)
+static int set_bss_param(void *priv, struct wpa_driver_ap_params *params, int link_id)
 {
     struct nl_msg *msg;
     int ret;
@@ -13617,10 +13633,19 @@ int set_bss_param(void *priv, struct wpa_driver_ap_params *params)
         return -1;
     }
     nla_put_u8(msg, NL80211_ATTR_AP_ISOLATE, params->isolate);
-    wifi_hal_info_print("Set AP isolate:%d \r\n", params->isolate);
+#if HOSTAPD_VERSION >= 211
+#ifdef CONFIG_IEEE80211BE
+#ifndef CONFIG_DRIVER_BRCM
+    if (link_id != -1) {
+        nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID, link_id);
+    }
+#endif /* CONFIG_DRIVER_BRCM */
+#endif /* CONFIG_IEEE80211BE */
+#endif /* HOSTAPD_VERSION >= 211 */
+        wifi_hal_info_print("Set AP isolate:%d \r\n", params->isolate);
     ret = nl80211_send_and_recv(msg, NULL, NULL, NULL, NULL);
     if (ret != 0) {
-        wifi_hal_error_print("%s:%d: Failed to set bss for interface: %s error: %d(%s)\n", __func__, __LINE__, interface->name, ret, strerror(-ret));
+        wifi_hal_error_print("%s:%d: Failed to set bss for interface: %d error: %d(%s)\n", __func__, __LINE__, interface->index, ret, strerror(-ret));
         return -1;
     }
 
@@ -13861,7 +13886,7 @@ int wifi_drv_set_ap(void *priv, struct wpa_driver_ap_params *params)
         nl80211_link_interface_set_freq(interface, link_id_val, params->freq->freq);
     }
     if (link_id_val != -1) {
-        wifi_hal_dbg_print("%s:%d: nl80211: link_id=%u", __func__, __LINE__, link_id_val);
+        wifi_hal_dbg_print("%s:%d: nl80211: link_id=%u\n", __func__, __LINE__, link_id_val);
         nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID, link_id_val);
     }
 #endif /* CONFIG_DRIVER_BRCM */
@@ -14059,13 +14084,13 @@ int wifi_drv_set_ap(void *priv, struct wpa_driver_ap_params *params)
         if (nl80211_set_bss(interface, params->cts_protect, params->preamble,
             params->short_slot_time, params->ht_opmode,
             params->isolate, params->basic_rates, link_id_val) != 0) {
-            wifi_hal_dbg_print("%s:%d: Failed to set BSS for interface: %s error: %d(%s)\n", __func__, __LINE__, interface->name, ret, strerror(-ret));
+            wifi_hal_dbg_print("%s:%d: Failed to set BSS for interface: %s error: %d(%s)\n", __func__, __LINE__, link_interface->name, ret, strerror(-ret));
             return -1;
         }
     }
     else
     {
-        set_bss_param(priv, params);
+        set_bss_param(priv, params, link_id_val);
     }
     return 0;
 }
@@ -14798,9 +14823,9 @@ int wifi_drv_send_radius_fallback_and_failover(void *priv, int radius_switch_rea
 }
 
 #if HOSTAPD_VERSION >= 210 //2.10
-int     wifi_drv_set_key(void *priv, struct wpa_driver_set_key_params *params)
+static int     wifi_drv_set_key(void *priv, struct wpa_driver_set_key_params *params)
 #else
-int     wifi_drv_set_key(const char *ifname, void *priv, enum wpa_alg alg,
+static int     wifi_drv_set_key(const char *ifname, void *priv, enum wpa_alg alg,
                     const u8 *addr, int key_idx, int set_tx, const u8 *seq,
                     size_t seq_len, const u8 *key, size_t key_len)
 #endif
@@ -14810,11 +14835,20 @@ int     wifi_drv_set_key(const char *ifname, void *priv, enum wpa_alg alg,
     unsigned int suite;
     int ret;
     wifi_vap_info_t *vap;
+    int link_id = -1;
 
     interface = (wifi_interface_info_t *)priv;
     vap = &interface->vap_info;
 
-    wifi_hal_dbg_print("%s:%d: ifname:%s vap_index:%d\n", __func__, __LINE__, interface->name, vap->vap_index);
+#if HOSTAPD_VERSION >= 211
+#ifdef CONFIG_IEEE80211BE
+#ifndef CONFIG_DRIVER_BRCM
+    link_id = params->link_id;
+#endif /* CONFIG_DRIVER_BRCM */
+#endif /* CONFIG_IEEE80211BE */
+#endif /* HOSTAPD_VERSION >= 211 */
+
+    wifi_hal_dbg_print("%s:%d: ifname:%s vap_index:%d link_id:%d\n", __func__, __LINE__, interface->name, vap->vap_index, link_id);
     //wifi_hal_dbg_print("%s:%d: ifname: %s\n", __func__, __LINE__, interface->name);
     //wifi_hal_dbg_print("%s:%d: key Info: index:%d length:%d alg:%s\n", __func__, __LINE__, key_idx, key_len, wpa_alg_to_string(alg));
     //my_print_hex_dump(key_len, key);
@@ -14903,6 +14937,18 @@ int     wifi_drv_set_key(const char *ifname, void *priv, enum wpa_alg alg,
         return -1;
     }
 
+#if HOSTAPD_VERSION >= 211
+#ifdef CONFIG_IEEE80211BE
+#ifndef CONFIG_DRIVER_BRCM
+    if (link_id != -1) {
+        wifi_hal_dbg_print("%s:%d: nl80211: Link ID %d\n", __func__, __LINE__, link_id);
+        nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID, link_id);
+    }
+#endif /* CONFIG_DRIVER_BRCM */
+#endif /* CONFIG_IEEE80211BE */
+#endif /* HOSTAPD_VERSION >= 211 */
+
+
     nla_put(msg, NL80211_ATTR_KEY_DATA, params->key_len, params->key);
     nla_put_u32(msg, NL80211_ATTR_KEY_CIPHER, suite);
     if (params->seq && params->seq_len) {
@@ -14952,6 +14998,17 @@ int     wifi_drv_set_key(const char *ifname, void *priv, enum wpa_alg alg,
       return ret;
 
     msg = nl80211_drv_cmd_msg(g_wifi_hal.nl80211_id, interface, 0, NL80211_CMD_SET_KEY);
+
+#if HOSTAPD_VERSION >= 211
+#ifdef CONFIG_IEEE80211BE
+#ifndef CONFIG_DRIVER_BRCM
+    if (link_id != -1) {
+        wifi_hal_dbg_print("%s:%d: nl80211: set_key default - Link ID %d\n", __func__, __LINE__, link_id);
+        nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID, link_id);
+    }
+#endif /* CONFIG_DRIVER_BRCM */
+#endif /* CONFIG_IEEE80211BE */
+#endif /* HOSTAPD_VERSION >= 211 */
 
     nla_put_u8(msg, NL80211_ATTR_KEY_IDX, params->key_idx);
 #if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || defined (TCHCBRV2_PORT) || defined(_PLATFORM_RASPBERRYPI_) || defined(_PLATFORM_BANANAPI_R4_)
