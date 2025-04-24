@@ -1916,7 +1916,8 @@ static void handle_probe_req_event_for_bm(wifi_interface_info_t *interface, stru
 int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *mgmt, u16 reason, int sig_dbm, int snr, int phy_rate, unsigned int len, int link_id) {
 
     wifi_mgmtFrameType_t mgmt_type;
-    wifi_direction_t dir;
+    wifi_interface_info_t *link_interface;
+    wifi_direction_t dir = wifi_direction_unknown;
     unsigned char cat;
     unsigned short fc, stype;
     mac_address_t   sta, bmac = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
@@ -1942,9 +1943,14 @@ int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *
         return -1;
     }
 
+    link_interface = nl80211_get_link_interface(interface->u.ap.hapd.drv_priv, link_id);
+
+    wifi_hal_dbg_print("%s:%d: interface:%s link_interface:%s link_id:%d\n", __func__, __LINE__,
+        interface->name, link_interface->name, link_id);
+
     callbacks = get_hal_device_callbacks();
     hooks = get_device_frame_hooks();
-    vap = &interface->vap_info;
+    vap = &link_interface->vap_info;
 
     if (memcmp(mgmt->da, interface->mac, sizeof(mac_address_t)) == 0) {
         memcpy(sta, mgmt->sa, sizeof(mac_address_t));
@@ -1960,15 +1966,14 @@ int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *
         to_mac_str(mgmt->sa, sta_mac_str);
         to_mac_str(mgmt->da, frame_da_str);
         wifi_hal_error_print("%s:%d: interface:%s dropping mgmt frame, interface mac:%s sta mac:%s"
-                             " frame da:%s\n",
+                             " frame da:%s (CONTINUE)\n",
             __func__, __LINE__, interface->name, interface_mac_str, sta_mac_str, frame_da_str);
-        if ((callbacks != NULL) && (callbacks->analytics_callback != NULL)) {
-            callbacks->analytics_callback("Dropping mgmt frame from interface:%s sta mac:%s frame da:%s",
-                interface_mac_str, sta_mac_str, frame_da_str);
-        }
-        return -1;
+        // if ((callbacks != NULL) && (callbacks->analytics_callback != NULL)) {
+        //     callbacks->analytics_callback("Dropping mgmt frame from interface:%s sta mac:%s frame da:%s",
+        //         interface_mac_str, sta_mac_str, frame_da_str);
+        // }
+        // return -1;
     }
-
 
     fc = le_to_host16(mgmt->frame_control);
     stype = WLAN_FC_GET_STYPE(fc);
@@ -1992,16 +1997,16 @@ int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *
         }
 
         if (callbacks->steering_event_callback != 0) {
-            handle_auth_req_event_for_bm(interface, sta, sig_dbm);
+            handle_auth_req_event_for_bm(link_interface, sta, sig_dbm);
         }
 #ifdef NL80211_ACL
-        if (is_core_acl_drop_mgmt_frame(interface, sta)) {
+        if (is_core_acl_drop_mgmt_frame(link_interface, sta)) {
             wifi_hal_dbg_print("%s:%d: Station present in acl list dropping auth req\n",
                                    __func__, __LINE__);
             return -1;
         }
 #endif
-        remove_station_from_other_interfaces(interface, sta);
+        remove_station_from_other_interfaces(link_interface, sta);
 #ifdef WIFI_EMULATOR_CHANGE
         send_mgmt_to_char_dev = true;
 #endif
@@ -2026,21 +2031,21 @@ int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *
 
         if (len >= IEEE80211_HDRLEN + sizeof(mgmt->u.assoc_req)) {
             wifi_hal_info_print(
-                "%s:%d: interface:%s received assoc frame from:%s to:%s cap:0x%x len:%d rssi:%d\n",
-                __func__, __LINE__, interface->name, to_mac_str(mgmt->sa, sta_mac_str),
+                "%s:%d: interface:%s (link:%s) received assoc frame from:%s to:%s cap:0x%x len:%d rssi:%d\n",
+                __func__, __LINE__, interface->name, link_interface->name, to_mac_str(mgmt->sa, sta_mac_str),
                 to_mac_str(mgmt->da, frame_da_str), le_to_host16(mgmt->u.assoc_req.capab_info), len,
                 sig_dbm);
         } else {
-            wifi_hal_info_print("%s:%d: interface:%s received assoc frame from:%s to:%s len:%d "
+            wifi_hal_info_print("%s:%d: interface:%s (link:%s) received assoc frame from:%s to:%s len:%d "
                                 "rssi:%d\n",
-                __func__, __LINE__, interface->name, to_mac_str(mgmt->sa, sta_mac_str),
+                __func__, __LINE__, interface->name, link_interface->name, to_mac_str(mgmt->sa, sta_mac_str),
                 to_mac_str(mgmt->da, frame_da_str), len, sig_dbm);
         }
 
         if (callbacks->steering_event_callback != 0) {
-            handle_assoc_req_event_for_bm(interface, mgmt, len, sta);
+            handle_assoc_req_event_for_bm(link_interface, mgmt, len, sta);
         }
-        remove_station_from_other_interfaces(interface, sta);
+        remove_station_from_other_interfaces(link_interface, sta);
 #ifdef WIFI_EMULATOR_CHANGE
         send_mgmt_to_char_dev = true;
 #endif
@@ -2050,19 +2055,19 @@ int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *
         mgmt_type = WIFI_MGMT_FRAME_TYPE_REASSOC_REQ;
 
         if (len >= IEEE80211_HDRLEN + sizeof(mgmt->u.reassoc_req)) {
-            wifi_hal_info_print("%s:%d: interface:%s received reassoc frame from:%s to:%s cap:0x%x "
+            wifi_hal_info_print("%s:%d: interface:%s (link:%s) received reassoc frame from:%s to:%s cap:0x%x "
                                 "len:%d rssi:%d\n",
-                __func__, __LINE__, interface->name, to_mac_str(mgmt->sa, sta_mac_str),
+                __func__, __LINE__, interface->name, link_interface->name, to_mac_str(mgmt->sa, sta_mac_str),
                 to_mac_str(mgmt->da, frame_da_str), le_to_host16(mgmt->u.reassoc_req.capab_info),
                 len, sig_dbm);
         } else {
-            wifi_hal_info_print("%s:%d: interface:%s received reassoc frame from:%s to:%s len:%d "
+            wifi_hal_info_print("%s:%d: interface:%s (link:%s) received reassoc frame from:%s to:%s len:%d "
                                 "rssi:%d\n",
-                __func__, __LINE__, interface->name, to_mac_str(mgmt->sa, sta_mac_str),
+                __func__, __LINE__, interface->name, link_interface->name, to_mac_str(mgmt->sa, sta_mac_str),
                 to_mac_str(mgmt->da, frame_da_str), len, sig_dbm);
         }
 
-        remove_station_from_other_interfaces(interface, sta);
+        remove_station_from_other_interfaces(link_interface, sta);
 #ifdef WIFI_EMULATOR_CHANGE
         send_mgmt_to_char_dev = true;
 #endif
@@ -2077,11 +2082,11 @@ int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *
         //wifi_hal_dbg_print("%s:%d: Received probe req frame on interface:%s from the sta : %s and the phy_rate:%d\n", __func__, __LINE__,interface->name,to_mac_str(sta, sta_mac_str),phy_rate);
 
         if (callbacks->steering_event_callback != 0) {
-            handle_probe_req_event_for_bm(interface, mgmt, len, sta, sig_dbm);
+            handle_probe_req_event_for_bm(link_interface, mgmt, len, sta, sig_dbm);
         }
 #ifdef NL80211_ACL
         // If mac filter acl is enabled then we need to drop mgmt frame based on acl config
-        if (is_core_acl_drop_mgmt_frame(interface, sta)) {
+        if (is_core_acl_drop_mgmt_frame(link_interface, sta)) {
             return -1;
         }
 #endif
@@ -2094,18 +2099,18 @@ int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *
         mgmt_type = WIFI_MGMT_FRAME_TYPE_ACTION;
         cat = mgmt->u.action.category;
 
-        wifi_hal_dbg_print("%s:%d: interface:%s received action frame from:%s to:%s, category:%d\n",
-            __func__, __LINE__, interface->name, to_mac_str(mgmt->sa, sta_mac_str),
+        wifi_hal_dbg_print("%s:%d: interface:%s (link:%s) received action frame from:%s to:%s, category:%d\n",
+            __func__, __LINE__, interface->name, link_interface->name, to_mac_str(mgmt->sa, sta_mac_str),
             to_mac_str(mgmt->da, frame_da_str), cat);
 
         switch (cat) {
         case wifi_action_frame_wnm:
             // - don't handle frame by calling wpa_supplicant_event() if action frame was already handled:
-            forward_frame = (WIFI_HAL_UNSUPPORTED == handle_wnm_action_frame(interface, sta, mgmt, len));
+            forward_frame = (WIFI_HAL_UNSUPPORTED == handle_wnm_action_frame(link_interface, sta, mgmt, len));
             break;
         case wifi_action_frame_type_radio_msmt:
             // - don't handle frame by calling wpa_supplicant_event() if action frame was already handled:
-            forward_frame = (WIFI_HAL_UNSUPPORTED == handle_rrm_action_frame(interface, sta, mgmt, len, sig_dbm));
+            forward_frame = (WIFI_HAL_UNSUPPORTED == handle_rrm_action_frame(link_interface, sta, mgmt, len, sig_dbm));
             break;
         case wifi_action_frame_type_public:
             // - don't handle frame by calling wpa_supplicant_event() if action frame was already
@@ -2126,20 +2131,20 @@ int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *
         mgmt_type = WIFI_MGMT_FRAME_TYPE_DISASSOC;
 
         if (len >= IEEE80211_HDRLEN + sizeof(mgmt->u.disassoc)) {
-            wifi_hal_info_print("%s:%d: interface:%s received disassoc frame from:%s to:%s sc:%d "
+            wifi_hal_info_print("%s:%d: interface:%s (link:%s) received disassoc frame from:%s to:%s sc:%d "
                                 "len:%d reason:%d\n",
-                __func__, __LINE__, interface->name, to_mac_str(mgmt->sa, sta_mac_str),
+                __func__, __LINE__, interface->name, link_interface->name, to_mac_str(mgmt->sa, sta_mac_str),
                 to_mac_str(mgmt->da, frame_da_str), le_to_host16(mgmt->u.disassoc.reason_code), len,
                 reason);
         } else {
-            wifi_hal_info_print("%s:%d: interface:%s received disassoc frame from:%s to:%s len:%d "
+            wifi_hal_info_print("%s:%d: interface:%s (link:%s) received disassoc frame from:%s to:%s len:%d "
                                 "reason:%d\n",
-                __func__, __LINE__, interface->name, to_mac_str(mgmt->sa, sta_mac_str),
+                __func__, __LINE__, interface->name, link_interface->name, to_mac_str(mgmt->sa, sta_mac_str),
                 to_mac_str(mgmt->da, frame_da_str), len, reason);
         }
 
         pthread_mutex_lock(&g_wifi_hal.hapd_lock);
-        station = ap_get_sta(&interface->u.ap.hapd, sta);
+        station = ap_get_sta(&link_interface->u.ap.hapd, sta);
         if (station) {
             wifi_hal_dbg_print("station disassocreason in disassoc frame is %d\n", station->disconnect_reason_code);
 #if !defined(PLATFORM_LINUX)
@@ -2149,8 +2154,8 @@ int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *
 #endif
             ap_free_sta(&interface->u.ap.hapd, station);
         } else {
-            wifi_hal_dbg_print("%s:%d: interface:%s sta %s not found\n", __func__, __LINE__,
-                interface->name, to_mac_str(sta, sta_mac_str));
+            wifi_hal_dbg_print("%s:%d: interface:%s (link:%s) sta %s not found\n", __func__, __LINE__,
+                interface->name, link_interface->name, to_mac_str(sta, sta_mac_str));
         }
         pthread_mutex_unlock(&g_wifi_hal.hapd_lock);
 
@@ -2160,7 +2165,7 @@ int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *
             }
         }
         if (callbacks->steering_event_callback != 0) {
-            handle_disconnect_event_for_bm(interface, sta, mgmt_type, reason);
+            handle_disconnect_event_for_bm(link_interface, sta, mgmt_type, reason);
         }
 #ifdef WIFI_EMULATOR_CHANGE
         send_mgmt_to_char_dev = true;
@@ -2171,15 +2176,15 @@ int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *
         mgmt_type = WIFI_MGMT_FRAME_TYPE_DEAUTH;
 
         if (len >= IEEE80211_HDRLEN + sizeof(mgmt->u.deauth)) {
-            wifi_hal_info_print("%s:%d: interface:%s received deauth frame from:%s to:%s sc:%d "
+            wifi_hal_info_print("%s:%d: interface:%s (link:%s) received deauth frame from:%s to:%s sc:%d "
                                 "len:%d reason:%d\n",
-                __func__, __LINE__, interface->name, to_mac_str(mgmt->sa, sta_mac_str),
+                __func__, __LINE__, interface->name, link_interface->name, to_mac_str(mgmt->sa, sta_mac_str),
                 to_mac_str(mgmt->da, frame_da_str), le_to_host16(mgmt->u.disassoc.reason_code), len,
                 reason);
         } else {
-            wifi_hal_info_print("%s:%d: interface:%s received deauth frame from:%s to:%s len:%d "
+            wifi_hal_info_print("%s:%d: interface:%s (link:%s) received deauth frame from:%s to:%s len:%d "
                                 "reason:%d\n",
-                __func__, __LINE__, interface->name, to_mac_str(mgmt->sa, sta_mac_str),
+                __func__, __LINE__, interface->name, link_interface->name, to_mac_str(mgmt->sa, sta_mac_str),
                 to_mac_str(mgmt->da, frame_da_str), len, reason);
         }
 
@@ -2193,7 +2198,7 @@ int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *
         }
 
         pthread_mutex_lock(&g_wifi_hal.hapd_lock);
-        station = ap_get_sta(&interface->u.ap.hapd, sta);
+        station = ap_get_sta(&link_interface->u.ap.hapd, sta);
         if (station) {
             wifi_hal_dbg_print("station deauthreason in deauth frame is %d\n", station->disconnect_reason_code);
 #if !defined(PLATFORM_LINUX)
@@ -2212,11 +2217,11 @@ int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *
                 }
             }
         } else {
-            wifi_hal_dbg_print("%s:%d: interface:%s sta %s not found\n", __func__, __LINE__,
-                interface->name, to_mac_str(sta, sta_mac_str));
+            wifi_hal_dbg_print("%s:%d: interface:%s (link:%s) sta %s not found\n", __func__, __LINE__,
+                interface->name, interface->name, to_mac_str(sta, sta_mac_str));
         }
         if (callbacks->steering_event_callback != 0) {
-            handle_disconnect_event_for_bm(interface, sta, mgmt_type, reason);
+            handle_disconnect_event_for_bm(link_interface, sta, mgmt_type, reason);
         }
 #ifdef WIFI_EMULATOR_CHANGE
         send_mgmt_to_char_dev = true;
@@ -2276,7 +2281,7 @@ int process_frame_mgmt(wifi_interface_info_t *interface, struct ieee80211_mgmt *
         event.rx_mgmt.snr_db = snr;
 #endif
         pthread_mutex_lock(&g_wifi_hal.hapd_lock);
-        wpa_supplicant_event(&interface->u.ap.hapd, EVENT_RX_MGMT, &event);
+        wpa_supplicant_event(&link_interface->u.ap.hapd, EVENT_RX_MGMT, &event);
         pthread_mutex_unlock(&g_wifi_hal.hapd_lock);
     }
 
@@ -5064,6 +5069,7 @@ static void wiphy_info_probe_resp_offload(struct wpa_driver_capa *capa,
 static void wiphy_info_extended_capab(wifi_driver_data_t *drv,
                       struct nlattr *tb)
 {
+    wifi_hal_dbg_print("%s:%d: EXT Capability: START\n", __func__, __LINE__);
     int rem = 0, i;
     struct nlattr *tb1[NL80211_ATTR_MAX + 1], *attr;
 
@@ -5117,6 +5123,9 @@ static void wiphy_info_extended_capab(wifi_driver_data_t *drv,
             capa->mld_capa_and_ops =
                 nla_get_u16(tb1[NL80211_ATTR_MLD_CAPA_AND_OPS]);
         }
+
+        wifi_hal_dbg_print("%s:%d: nl80211: EML Capability: 0x%x MLD Capability: 0x%x",
+            __func__, __LINE__, capa->eml_capa, capa->mld_capa_and_ops);
 #endif /* CONFIG_IEEE80211BE */
 #endif /* HOSTAPD_VERSION >= 211 */
 
@@ -5671,14 +5680,14 @@ static int wiphy_dump_handler(struct nl_msg *msg, void *arg)
     }
 
     if (tb[NL80211_ATTR_DEVICE_AP_SME]) {
-        /* XXX: undeclared in nl80211_copy.h, maybe needs to be fixed
+#if HOSTAPD_VERSION >= 211
         u32 ap_sme_features_flags =
             nla_get_u32(tb[NL80211_ATTR_DEVICE_AP_SME]);
 
         if (ap_sme_features_flags & NL80211_AP_SME_SA_QUERY_OFFLOAD) {
             capa->flags2 |= WPA_DRIVER_FLAGS2_SA_QUERY_OFFLOAD_AP;
-        }*/
-
+        }
+#endif /* HOSTAPD_VERSION >= 211 */
         radio->driver_data.device_ap_sme = 1;
     }
 
@@ -7584,6 +7593,14 @@ int nl80211_create_interface(wifi_radio_info_t *radio, wifi_vap_info_t *vap, wif
 
     msg = nl80211_drv_cmd_msg(g_wifi_hal.nl80211_id, NULL, 0, NL80211_CMD_NEW_INTERFACE);
     if (msg == NULL) {
+        return -1;
+    }
+
+    /*
+    * !MTK extension
+    */
+    if (nla_put_u32(msg, NL80211_ATTR_VIF_RADIO_MASK, 0x6) < 0) {
+        nlmsg_free(msg);
         return -1;
     }
 
@@ -10171,7 +10188,6 @@ int wifi_drv_get_ext_capab(void *priv, enum wpa_driver_if_type type,
 static int wifi_drv_get_mld_capab(void *priv, enum wpa_driver_if_type type,
                                  u16 *eml_capa, u16 *mld_capa_and_ops)
 {
-    wifi_hal_dbg_print("%s:%d: Enter\n", __func__, __LINE__);
     wifi_interface_info_t *interface;
     wifi_vap_info_t *vap;
     wifi_radio_info_t *radio;
@@ -10202,6 +10218,10 @@ static int wifi_drv_get_mld_capab(void *priv, enum wpa_driver_if_type type,
             break;
         }
     }
+
+    wifi_hal_dbg_print("%s:%d: eml_capa: 0x%x, mld_capa_and_ops: 0x%x\n", __func__, __LINE__,
+        *eml_capa, *mld_capa_and_ops);
+
     return 0;
 }
 #endif /* CONFIG_IEEE80211BE */
