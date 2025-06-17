@@ -620,7 +620,7 @@ int update_security_config(wifi_vap_security_t *sec, struct hostapd_bss_config *
                 case wifi_security_mode_wpa_personal:
                 case wifi_security_mode_wpa2_personal:
                 case wifi_security_mode_wpa_wpa2_personal:
-                    conf->wpa_key_mgmt |= WPA_KEY_MGMT_PSK_SHA256;
+//                    conf->wpa_key_mgmt |= WPA_KEY_MGMT_PSK_SHA256;
                     break;
                 case wifi_security_mode_wpa_enterprise:
                 case wifi_security_mode_wpa2_enterprise:
@@ -2623,7 +2623,7 @@ void update_wpa_sm_params(wifi_interface_info_t *interface)
         case wifi_security_mode_wpa_personal:
         case wifi_security_mode_wpa2_personal:
         case wifi_security_mode_wpa_wpa2_personal:
-            wpa_key_mgmt_11w |= WPA_KEY_MGMT_PSK_SHA256;
+//            wpa_key_mgmt_11w |= WPA_KEY_MGMT_PSK_SHA256;
             break;
         case wifi_security_mode_wpa_enterprise:
         case wifi_security_mode_wpa2_enterprise:
