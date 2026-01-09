@@ -92,7 +92,6 @@ static void platform_set_eht(wifi_radio_index_t index, bool enable);
 #if defined(KERNEL_NO_320MHZ_SUPPORT)
 static void platform_csa_to_chanspec(struct csa_settings *settings, char *chspec);
 static bool platform_is_same_chanspec(wifi_radio_index_t index, char *new_chanspec);
-static enum nl80211_chan_width bandwidth_str_to_nl80211_width(char *bandwidth);
 static enum nl80211_chan_width platform_get_chanspec_bandwidth(char *chanspec);
 #endif
 #endif
