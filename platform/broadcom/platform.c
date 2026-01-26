@@ -19,7 +19,7 @@
 
 #include <stddef.h>
 #include "wifi_hal.h"
-#if defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
 #include "typedefs.h"
 #include "bcmwifi_channels.h"
 #endif
@@ -37,20 +37,22 @@
 #include <string.h>
 #endif // defined (ENABLED_EDPD)
 
-#if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(RDKB_ONE_WIFI_PROD)
-#include <rdk_nl80211_hal.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
+#if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXF10_PORT) || \
+    defined(RDKB_ONE_WIFI_PROD)
 #include <fcntl.h>
+#include <rdk_nl80211_hal.h>
 #include <semaphore.h>
 #include <stdint.h>
+#include <sys/mman.h>
 #include <unistd.h>
-#elif defined(SCXER10_PORT)
+#elif defined(SCXER10_PORT) || defined(TCHCBRV2_PORT)
 #include <rdk_nl80211_hal.h>
-#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXF10_PORT || RDKB_ONE_WIFI_PROD
+#endif /* TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXF10_PORT || TCHCBRV2_PORT ||
+          RDKB_ONE_WIFI_PROD */
 
 #if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || \
-    defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT) || defined(RDKB_ONE_WIFI_PROD)
+    defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT) || defined(SCXF10_PORT) || defined(RDKB_ONE_WIFI_PROD)
 #undef ENABLE
 #undef BW_20MHZ
 #undef BW_40MHZ
@@ -62,16 +64,19 @@
 #define mld_link_info _mld_link_info
 #if defined(SCXER10_PORT)
 #include <wifi-include/wlioctl.h>
-#elif defined(SKYSR213_PORT)
+#elif defined(SKYSR213_PORT) || defined(SCXF10_PORT)
 #include <wlioctl.h>
+#include <wlioctl_defs.h>
 #else
 #include <wifi/wlioctl.h>
 #endif
-#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || TCHCBRV2_PORT || SKYSR213_PORT || RDKB_ONE_WIFI_PROD
+#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || TCHCBRV2_PORT || SKYSR213_PORT ||
+       // SCXF10_PORT || RDKB_ONE_WIFI_PROD
 
 #if defined(SCXER10_PORT) && defined(CONFIG_IEEE80211BE)
 static bool l_eht_set = false;
-void (*g_eht_oneshot_notify)(wifi_interface_info_t *interface) = NULL;
+static int l_eht_interface_count = 0;
+bool (*g_eht_event_notify)(wifi_interface_info_t *interface) = NULL;
 
 /*
 If include secure_wrapper.h, will need to convert other system calls with v_secure_system calls
@@ -83,8 +88,9 @@ int v_secure_pclose(FILE *);
 
 static bool platform_radio_state(wifi_radio_index_t index);
 static bool platform_is_eht_enabled(wifi_radio_index_t index);
-static void platform_set_eht_hal_callback(wifi_interface_info_t *interface);
+static bool platform_set_eht_hal_callback(wifi_interface_info_t *interface);
 static void platform_wait_for_eht(void);
+static void platform_create_bss_states_string(wifi_radio_index_t index, char *cmd, size_t size);
 static void platform_set_eht(wifi_radio_index_t index, bool enable);
 #if defined(KERNEL_NO_320MHZ_SUPPORT)
 static void platform_csa_to_chanspec(struct csa_settings *settings, char *chspec);
@@ -97,7 +103,14 @@ static enum nl80211_chan_width platform_get_chanspec_bandwidth(char *chanspec);
 #define BUFFER_LENGTH_WIFIDB 256
 #define BUFLEN_128  128
 #define BUFLEN_256 256
+#define BUFLEN_512 512
+#define BUFLEN_1024 1024
 #define WIFI_BLASTER_DEFAULT_PKTSIZE 1470
+#define ACS_MAX_CHANNEL_WEIGHT 100
+#define ACS_MIN_CHANNEL_WEIGHT 1
+#define RADIO_INDEX_2G 0
+#define RADIO_INDEX_5G 1
+#define RADIO_INDEX_6G 2
 
 #ifdef CONFIG_IEEE80211BE
 #ifdef CONFIG_NO_MLD_ONLY_PRIVATE
@@ -121,7 +134,7 @@ static wl_runtime_params_t g_wl_runtime_params[] = {
 };
 
 #if defined(FEATURE_HOSTAP_MGMT_FRAME_CTRL)
-#if defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
 static bool needs_conf_mbssid_num_frames(uint vap_index, int hostap_mgt_frame_ctrl, int *mbssid_num_frames);
 #endif
 static bool needs_conf_split_assoc_req(uint vap_index, int hostap_mgt_frame_ctrl, int *assoc_ctrl);
@@ -186,7 +199,7 @@ static int get_ccspwifiagent_interface_name_from_vap_index(unsigned int vap_inde
 }
 #endif
 
-#if defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
 unsigned int convert_channelBandwidth_to_bcmwifibandwidth(wifi_channelBandwidth_t chanWidth)
 {
     switch(chanWidth)
@@ -462,6 +475,9 @@ static int mlo_radio_cnt = 0; /* Number of MLO radios */
 static int mlo_radio_map = 0; /* Bitmap, set if a radio is MLO enabled */
 static int mlo_init_map = -1; /* Bitmap, set if creatVAP is called to init this radio */
 static int mld_vapidx[MAX_MLD_UNITS][MAX_MLO_RADIOS];
+static int _mld_enable[MAX_MLD_UNITS] = { 0 };
+static int _vap_enable[MAX_VAP] = { 0 };
+static int _vap_mld_unit[MAX_VAP];
 extern int wl_iovar_get(char *ifname, char *iovar, void *bufptr, int buflen);
 
 static void get_ifname(int vap_index, char *ifname)
@@ -502,7 +518,7 @@ static bool platform_down_reqd(wifi_radio_index_t r_index, wifi_vap_info_map_t *
 
         reqd |= needs_conf_split_assoc_req(
             vap_index,map->vap_array[index].u.bss_info.hostap_mgt_frame_ctrl, &ctrl);
-#if defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
         reqd |= needs_conf_mbssid_num_frames(
             vap_index,map->vap_array[index].u.bss_info.hostap_mgt_frame_ctrl, &ctrl);
 #endif
@@ -607,7 +623,7 @@ int platform_bss_up(int vap_index, bool up)
             rc = wl_iovar_set(osifname, "bss", &setbuf, sizeof(setbuf));
             snprintf(cmd, sizeof(cmd), "wl_iovar bss %s", up ? "up" : "down"); /* For print */
         } else
-            snprintf(cmd, sizeof(cmd), "NOP");
+            snprintf(cmd, sizeof(cmd), "%s bssup=%d up=%d NOP", osifname, isbssup, up);
     }
     wifi_hal_info_print("### %s: cmd=[%s] rc=%d ###\n", __func__, cmd, rc);
     return rc;
@@ -649,6 +665,7 @@ int platform_mlo_init(void)
     }
     mlo_init_map = 0;
     memset(mld_vapidx, -1, sizeof(mld_vapidx));
+    memset(_vap_mld_unit, -1, sizeof(_vap_mld_unit));
     wifi_hal_info_print("### %s: wl_mlo_config=[%s] MAP=%d radio_cnt %d radio_map %d init_map %d ###\n",
          __func__, value, mlo_MAP, mlo_radio_cnt, mlo_radio_map, mlo_init_map);
 
@@ -666,6 +683,38 @@ int platform_mlo_up(void)
     return rc;
 }
 
+/*
+ * Bring all BSSes up per mld_unit.
+ */
+void platform_mld_up(int mld_unit, bool up)
+{
+    int i, vapidx, nlinks = 0;
+    char interface_name[8];
+
+    for (i = 0; i < MAX_MLO_RADIOS; i++) {
+        vapidx = mld_vapidx[mld_unit][i];
+        if (vapidx >= 0)
+            nlinks++;
+    }
+    if (nlinks < 2) {
+        wifi_hal_info_print("### %s: mld %d nlinks %d, skip ###\n", __func__, mld_unit, nlinks);
+        return;
+    }
+    for (i = 0; i < MAX_MLO_RADIOS; i++) {
+        vapidx = mld_vapidx[mld_unit][i];
+        if (vapidx < 0)
+            continue;
+
+        get_ifname(vapidx, interface_name);
+        wifi_hal_info_print("### %s: %s calling platform_bss_up(%d, %d) ###\n", __func__,
+            interface_name, vapidx, up);
+        platform_bss_up(vapidx, up);
+    }
+}
+
+/*
+ * Update the mld_vapidx[][] array
+ */
 void platform_mld_update(wifi_vap_info_t *vap)
 {
     int i, mld_unit = -1, vapidx = -1;
@@ -681,43 +730,150 @@ void platform_mld_update(wifi_vap_info_t *vap)
             wifi_hal_info_print("### %s: mld%d[%d] vap_index changes from %d to %d ###\n", __func__,
                 mld_unit, vap->radio_index, vapidx, vap->vap_index);
             mld_vapidx[mld_unit][vap->radio_index] = vap->vap_index;
+            _vap_mld_unit[vapidx] = mld_unit;
         }
     } else {
         /* Clean up the vap_index of this radio */
         for (i = 0; i < MAX_MLD_UNITS; i++) {
             if (mld_vapidx[i][vap->radio_index] == vap->vap_index) {
                 mld_vapidx[i][vap->radio_index] = -1;
+                _vap_mld_unit[vap->vap_index] = -1;
                 break;
             }
         }
     }
-    if (_platform_init_done != FALSE && mld_cmn->mld_enable && mld_unit >= 0) {
-        char interface_name[8];
+}
 
-        for (i = 0; i < MAX_MLO_RADIOS; i++) {
-            vapidx = mld_vapidx[mld_unit][i];
-            if (vapidx < 0)
-                continue;
+/*
+ * Send SET_MLD subcommand with RDK_VENDOR_ATTR_MLD_CONFIG_APPLY
+ */
+int nl80211_send_mld_apply(wifi_interface_info_t *interface)
+{
+    int ret = 0;
+    struct nl_msg *msg_mlo;
+    struct nlattr *nlattr_vendor;
 
-            get_ifname(vapidx, interface_name);
-            wifi_hal_info_print("### %s: %s calling platform_bss_up(%d, %d) ###\n", __func__,
-                interface_name, vapidx, TRUE);
-            platform_bss_up(vapidx, TRUE);
+    if (interface == NULL) {
+    /* Any interface can be used to send MLD_CONFIG_APPLY */
+	interface = get_interface_by_vap_index(0);
+    }
+    if (interface == NULL) {
+        wifi_hal_info_print("### %s: NULL interface ###\n", __func__);
+        return -1;
+    }
+    wifi_hal_info_print("### %s: mlo_init_map=%d mlo_radio_map=%d on %s ###\n",
+        __func__, mlo_init_map, mlo_radio_map, interface->name);
+
+    /*
+     * message format
+     *
+     * NL80211_ATTR_VENDOR_DATA
+     * RDK_VENDOR_ATTR_MLD_CONFIG_APPLY
+     */
+    if ((msg_mlo = nl80211_drv_vendor_cmd_msg(g_wifi_hal.nl80211_id, interface, 0, OUI_COMCAST,
+             RDK_VENDOR_NL80211_SUBCMD_SET_MLD)) == NULL ||
+        (nlattr_vendor = nla_nest_start(msg_mlo, NL80211_ATTR_VENDOR_DATA)) == NULL ||
+        nla_put_u8(msg_mlo, RDK_VENDOR_ATTR_MLD_CONFIG_APPLY, 1) < 0) {
+        wifi_hal_error_print("### %s: Failed to create NL command ###\n", __func__);
+        nlmsg_free(msg_mlo);
+        return -1;
+    }
+    nla_nest_end(msg_mlo, nlattr_vendor);
+    ret = nl80211_send_and_recv(msg_mlo, NULL, &g_wifi_hal, NULL, NULL);
+
+    wifi_hal_info_print("### %s: ret=%d ###\n", __func__, ret);
+    return ret;
+}
+
+/*
+ * Update the _vap_enable[] and restore bss up/dn states per vap_map.
+ *
+ * When a radio participates in MLO, wl down will bring other participating radios down.
+ * When a BSS is in an MLD, wl bss down will bring other BSSes of the same MLD down.
+ * So the kernel modules cannot read & restore the current radio/BSS states.
+ * This function will bring the BSSes up/down according to the _vap_enable[].
+ */
+int platform_vap_enable_update(wifi_vap_info_map_t *vap_map, bool handle_mld)
+{
+    int i, j, k, radio_index, vap_index, vap_enabled, is_mlo, mld_unit;
+
+    if (vap_map != NULL) {
+        for (i = 0; i < g_wifi_hal.num_radios; i++) {
+            if (vap_map[i].num_vaps == 0)
+                break;
+            for (j = 0; j < vap_map[i].num_vaps; j++) {
+                is_mlo = FALSE;
+                vap_index = vap_map[i].vap_array[j].vap_index;
+                radio_index = vap_map[i].vap_array[j].radio_index;
+                if (radio_index >= MAX_NUM_RADIOS || vap_index >= MAX_VAP) {
+                    wifi_hal_error_print("### %s: invalid radio %d vap %d) ###\n", __func__,
+                        radio_index, vap_index);
+                    return -2;
+                }
+                for (k = 0; k < MAX_MLD_UNITS; k++) {
+                    if (mld_vapidx[k][radio_index] == vap_index) {
+                        is_mlo = TRUE;
+                        mld_unit = k;
+                        break;
+                    }
+                }
+
+                if (vap_map[i].vap_array[j].vap_mode == wifi_vap_mode_ap)
+                    vap_enabled = vap_map[i].vap_array[j].u.bss_info.enabled;
+                else
+                    vap_enabled = vap_map[i].vap_array[j].u.sta_info.enabled;
+                _vap_enable[vap_index] = vap_enabled;
+
+                if (is_mlo) {
+                    if (vap_enabled == FALSE) {
+                        /* Check all other MLD BSSes, override if any _vap_enable is true */
+                        for (k = 0; k < MAX_MLO_RADIOS; k++) {
+                            if (k == radio_index)
+                                continue;
+                            vap_index = mld_vapidx[mld_unit][k];
+                            if (vap_index >= 0 && _vap_enable[vap_index]) {
+                                vap_enabled = TRUE;
+                                break;
+                            }
+                        }
+                    }
+                    _mld_enable[mld_unit] = vap_enabled;
+                }
+            } /*for vap_map[radio_index].vap_array[vap_index]*/
+        } /* for each vap_map[radio_index] */
+    } /* vap_map != NULL */
+    /* Bring up all non-MLO BSSes */
+    for (i = 0; i < MAX_VAP; i++) {
+        if (_vap_enable[i] && _vap_mld_unit[i] < 0) {
+            platform_bss_up(i, _vap_enable[i]);
         }
     }
+
+    if (handle_mld == FALSE)
+        return 0;
+
+    /* Bring up all MLDs */
+    for (k = 0; k < MAX_MLD_UNITS; k++) {
+        if (_mld_enable[k] == FALSE)
+            continue;
+        wifi_hal_info_print("### %s: calling platform_mld_up(%d, %d) ###\n",
+            __func__, k, _mld_enable[k]);
+        platform_mld_up(k, _mld_enable[k]);
+    }
+    return 0;
 }
 
 void platform_mlo_post_init(void)
 {
     wifi_hal_info_print("### %s: mlo_init_map=%d mlo_radio_map=%d ###\n", __func__, mlo_init_map,
         mlo_radio_map);
+    platform_radio_up(-1, TRUE); /* Bring all radios up */
     if (mlo_init_map != mlo_radio_map) {
         return;
     }
-    platform_radio_up(-1, TRUE);
     platform_mlo_up();
 }
-#endif /* CONFIG_IEEE80211BE && XB10_PORT */
+#endif /* CONFIG_IEEE80211BE && XB10_PORT && MLO_ENAB */
 
 int platform_pre_init()
 {
@@ -780,42 +936,6 @@ static int enable_spect_management(int radio_index, int enable)
     return 0;
 }
 
-int platform_get_chanspec_list(unsigned int radioIndex, wifi_channelBandwidth_t bandwidth, wifi_channels_list_t chanlist, char* buff)
-{
-#if defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT)
-    unsigned int bw = convert_channelBandwidth_to_bcmwifibandwidth(bandwidth);
-    unsigned int band = convert_radioindex_to_bcmband(radioIndex);
-    if(bw != UINT_MAX && band != UINT_MAX)
-    {
-        convert_from_channellist_to_chspeclist(bw,band,chanlist,buff);
-    }
-    else
-    {
-        return RETURN_ERR;
-    }
-#endif
-    return RETURN_OK;
-}
-
-int platform_set_acs_exclusion_list(unsigned int radioIndex, char* str)
-{
-#if defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT)
-    char excl_chan_string[20];
-    snprintf(excl_chan_string,sizeof(excl_chan_string),"wl%u_acs_excl_chans",radioIndex);
-    if(str != NULL)
-    {
-        set_string_nvram_param(excl_chan_string,str);
-        nvram_commit();
-    }
-    else
-    {
-        nvram_unset(excl_chan_string);
-        nvram_commit();
-    }
-#endif
-    return RETURN_OK;
-}
-
 static int disable_dfs_auto_channel_change(int radio_index, int disable)
 {
 #if defined(FEATURE_HOSTAP_MGMT_FRAME_CTRL)
@@ -845,6 +965,94 @@ static int disable_dfs_auto_channel_change(int radio_index, int disable)
     return 0;
 }
 
+int platform_get_chanspec_list(unsigned int radioIndex, wifi_channelBandwidth_t bandwidth, wifi_channels_list_t chanlist, char* buff)
+{
+#if defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
+    unsigned int bw = convert_channelBandwidth_to_bcmwifibandwidth(bandwidth);
+    unsigned int band = convert_radioindex_to_bcmband(radioIndex);
+    if(bw != UINT_MAX && band != UINT_MAX)
+    {
+        convert_from_channellist_to_chspeclist(bw,band,chanlist,buff);
+    }
+    else
+    {
+        return RETURN_ERR;
+    }
+#endif
+    return RETURN_OK;
+}
+
+INT wifi_sendActionFrameExt(INT apIndex, mac_address_t MacAddr, UINT frequency, UINT wait, UCHAR *frame, UINT len)
+{
+    int res = wifi_hal_send_mgmt_frame(apIndex, MacAddr, frame, len, frequency, wait);
+    return (res == 0) ? WIFI_HAL_SUCCESS : WIFI_HAL_ERROR;
+}
+
+INT wifi_sendActionFrame(INT apIndex, mac_address_t MacAddr, UINT frequency, UCHAR *frame, UINT len)
+{
+    return wifi_sendActionFrameExt(apIndex, MacAddr, frequency, 0, frame, len);
+}
+
+char *generate_channel_weight_string(wifi_radio_index_t radio_index, int preferred_channel)
+{
+    const unsigned int *source_channels;
+    unsigned int source_count;
+
+    switch (radio_index) {
+    case RADIO_INDEX_2G:
+        source_channels = wifi_2g_channels;
+        source_count = wifi_2g_channels_count;
+        break;
+    case RADIO_INDEX_5G:
+        source_channels = wifi_5g_channels;
+        source_count = wifi_5g_channels_count;
+        break;
+    case RADIO_INDEX_6G:
+        source_channels = wifi_6g_channels;
+        source_count = wifi_6g_channels_count;
+        break;
+    default:
+        return NULL;
+    }
+
+    char *result = (char *)calloc(BUFLEN_512, sizeof(char));
+    if (!result) {
+        return NULL;
+    }
+    // Assign another pointer so that we don't lose context of the start of the string. Iterate with
+    // ptr.
+    char *ptr = result;
+    for (unsigned int i = 0; i < source_count; i++) {
+        unsigned int channel = source_channels[i];
+        unsigned int weight = (channel == (unsigned int)preferred_channel) ?
+            ACS_MAX_CHANNEL_WEIGHT :
+            ACS_MIN_CHANNEL_WEIGHT;
+
+        ptr += sprintf(ptr, "%u,%d,", channel, weight);
+    }
+    *--ptr = '\0';
+    return result;
+}
+
+int platform_set_acs_exclusion_list(unsigned int radioIndex, char* str)
+{
+#if defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
+    char excl_chan_string[20];
+    snprintf(excl_chan_string,sizeof(excl_chan_string),"wl%u_acs_excl_chans",radioIndex);
+    if(str != NULL)
+    {
+        set_string_nvram_param(excl_chan_string,str);
+        nvram_commit();
+    }
+    else
+    {
+        nvram_unset(excl_chan_string);
+        nvram_commit();
+    }
+#endif
+    return RETURN_OK;
+}
+
 int platform_set_radio_pre_init(wifi_radio_index_t index, wifi_radio_operationParam_t *operationParam)
 {
     if ((index < 0) || (operationParam == NULL)) {
@@ -854,8 +1062,10 @@ int platform_set_radio_pre_init(wifi_radio_index_t index, wifi_radio_operationPa
 
     char temp_buff[BUF_SIZE];
     char param_name[NVRAM_NAME_SIZE];
-    char cmd[BUFLEN_128];
+    char cmd[BUFLEN_1024]; 
     wifi_radio_info_t *radio;
+    bool is_radio_apply_required = false;
+
     radio = get_radio_by_rdk_index(index);
     if (radio == NULL) {
         wifi_hal_dbg_print("%s:%d:Could not find radio index:%d\n", __func__, __LINE__, index);
@@ -911,20 +1121,35 @@ int platform_set_radio_pre_init(wifi_radio_index_t index, wifi_radio_operationPa
         return 0;
     }
 
+    if (radio->oper_param.transmitPower != operationParam->transmitPower) {
+        if (wifi_setRadioTransmitPower(index, operationParam->transmitPower) != RETURN_OK)  {
+            wifi_hal_error_print("%s:%d: Failed to set transmitpower : %d for radio index:%d\n",
+                    __func__, __LINE__, operationParam->transmitPower, index);
+            return RETURN_ERR;
+        }
+        is_radio_apply_required = true;
+    }
+
     if (radio->oper_param.countryCode != operationParam->countryCode) {
         memset(temp_buff, 0 ,sizeof(temp_buff));
         get_coutry_str_from_code(operationParam->countryCode, temp_buff);
         if (wifi_setRadioCountryCode(index, temp_buff) != RETURN_OK) {
-            wifi_hal_dbg_print("%s:%d Failure in setting country code as %s in radio index %d\n", __FUNCTION__, __LINE__, temp_buff, index);
+            wifi_hal_error_print("%s:%d Failure in setting country code as %s in radio index %d\n", __FUNCTION__, __LINE__, temp_buff, index);
             return -1;
         }
+        is_radio_apply_required = true;
+    }
 
+    if (is_radio_apply_required == true) {
         if (wifi_applyRadioSettings(index) != RETURN_OK) {
-            wifi_hal_dbg_print("%s:%d Failure in applying Radio settings in radio index %d\n", __FUNCTION__, __LINE__, index);
+            wifi_hal_error_print("%s:%d Failure in applying Radio settings in radio index %d\n", __FUNCTION__, __LINE__, index);
             return -1;
         }
+    }
 
-        //Updating nvram param
+
+    if (radio->oper_param.countryCode != operationParam->countryCode) {
+        //Updating nvram param for country code
         memset(param_name, 0 ,sizeof(param_name));
         sprintf(param_name, "wl%d_country_code", index);
         set_string_nvram_param(param_name, temp_buff);
@@ -949,6 +1174,16 @@ int platform_set_radio_pre_init(wifi_radio_index_t index, wifi_radio_operationPa
                 system(chanbuff);
             }
 
+            memset(cmd, 0, sizeof(cmd));
+            sprintf(cmd, "wl%d_acs_channel_weights", index);
+            char *weight_string = generate_channel_weight_string(index, operationParam->channel);
+            if (weight_string != NULL) {
+                set_string_nvram_param(cmd, weight_string);
+                sprintf(cmd, "acs_cli2 -i wl%d set acs_channel_weights %s &", index, weight_string);
+                free(weight_string);
+                system(cmd);
+            }
+
             /* Run acsd2 autochannel */
             memset(cmd, 0 ,sizeof(cmd));
             sprintf(cmd, "acs_cli2 -i wl%d autochannel &", index);
@@ -961,10 +1196,6 @@ int platform_set_radio_pre_init(wifi_radio_index_t index, wifi_radio_operationPa
             system(cmd);
         }
     }
-
-#if defined(CONFIG_IEEE80211BE) && defined(SCXER10_PORT)
-    platform_set_eht(index, (operationParam->variant & WIFI_80211_VARIANT_BE) ? true : false);
-#endif
 
     snprintf(param_name, sizeof(param_name), "wl%d_reg_mode", index);
     if (operationParam->DfsEnabled) {
@@ -980,6 +1211,27 @@ int platform_set_radio_pre_init(wifi_radio_index_t index, wifi_radio_operationPa
         disable_dfs_auto_channel_change(index, true);
     }
 
+#if defined(CONFIG_IEEE80211BE)
+#if defined(SCXER10_PORT)
+    platform_set_eht(index, (operationParam->variant & WIFI_80211_VARIANT_BE) ? true : false);
+#elif defined(XB10_PORT)
+    int eht_enab = (operationParam->variant & WIFI_80211_VARIANT_BE) ? 1 : 0;
+    char interface_name[8];
+
+    snprintf(interface_name, sizeof(interface_name), "wl%d", index);
+    snprintf(param_name, sizeof(param_name), "%s_oper_stands", interface_name);
+    wifi_hal_dbg_print("### %s: radio=%d eht_enab=%d %s=%s ###\n", __FUNCTION__, index,
+        eht_enab, param_name, nvram_get(param_name));
+
+    if (_platform_init_done)
+        platform_radio_up(index, FALSE);
+    sprintf(cmd, "wl -i %s eht enab %d", interface_name, eht_enab);
+    system(cmd);
+    if (_platform_init_done)
+        platform_radio_up(index, TRUE);
+#endif
+#endif
+
     return 0;
 }
 
@@ -991,7 +1243,7 @@ int platform_post_init(wifi_vap_info_map_t *vap_map)
 
 #if defined(CONFIG_IEEE80211BE) && defined(XB10_PORT) && defined(MLO_ENAB)
     platform_mlo_post_init();
-    platform_radio_up(-1, TRUE);		/* Bring all radios up */
+    platform_vap_enable_update(vap_map, TRUE);		/* Bring all VAPs up, including MLDs */
     _platform_init_done = TRUE;
 #endif /* CONFIG_IEEE80211BE && XB10_PORT */
 
@@ -1220,7 +1472,7 @@ int platform_get_keypassphrase_default(char *password, int vap_index)
             return 0;
         }
     } else if(is_wifi_hal_vap_xhs(vap_index)) {
-#if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
         return nvram_get_default_xhs_password(password, vap_index);
 #else
         return nvram_get_default_password(password, vap_index);
@@ -1250,6 +1502,12 @@ int platform_get_radius_key_default(char *radius_key)
     }
     return 0;
 }
+
+static int file_exists(const char *filename) {
+    struct stat buffer;
+    return (stat(filename, &buffer) == 0);
+}
+
 int platform_get_ssid_default(char *ssid, int vap_index){
     char value[BUFFER_LENGTH_WIFIDB] = {0};
     FILE *fp = NULL;
@@ -1259,7 +1517,11 @@ int platform_get_ssid_default(char *ssid, int vap_index){
 #if defined(SKYSR300_PORT) || defined(SKYSR213_PORT)
         fp = popen("grep \"FACTORYSSID=\" /tmp/serial.txt | cut -d '=' -f2 | tr -d '\r\n'","r");
 #else
+        if (file_exists("/tmp/factory_nvram.data")) {
         fp = popen("grep \"Default 2.4 GHz SSID:\" /tmp/factory_nvram.data | cut -d ':' -f2 | cut -d ' ' -f2","r");
+        } else {
+            return nvram_get_current_ssid(ssid, vap_index);
+        }
 #endif
 
         if(fp != NULL) {
@@ -1274,7 +1536,7 @@ int platform_get_ssid_default(char *ssid, int vap_index){
             return 0;
         }
     } else if(is_wifi_hal_vap_xhs(vap_index)) {
-#if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
         return nvram_get_default_xhs_ssid(ssid, vap_index);
 #else
         return nvram_get_current_ssid(ssid, vap_index);
@@ -1402,11 +1664,18 @@ int nvram_get_current_ssid(char *l_ssid, int vap_index)
     }
     len = strlen(ssid);
     if (len < 0 || len > 63) {
-        wifi_hal_error_print("%s:%d invalid ssid length [%d], expected length is [0..63]\r\n", __func__, __LINE__, len);
+        wifi_hal_error_print("%s:%d invalid ssid length [%d], expected length is [0..63]\r\n",
+            __func__, __LINE__, len);
         return -1;
     }
+    for (int i = 0; i < len; i++) {
+        if (!((ssid[i] >= ' ') && (ssid[i] <= '~'))) {
+            wifi_hal_error_print("%s:%d: Invalid character %c in SSID\r\n", __func__, __LINE__,
+                ssid[i]);
+            return -1;
+        }
+    }
     strncpy(l_ssid, ssid, (len + 1));
-    wifi_hal_dbg_print("%s:%d vap[%d] ssid:%s nvram name:%s\r\n", __func__, __LINE__, vap_index, l_ssid, nvram_name);
     return 0;
 }
 
@@ -1428,18 +1697,11 @@ int nvram_get_default_xhs_ssid(char *l_ssid, int vap_index)
     }
     len = strlen(ssid);
     if (len < 0 || len > 63) {
-        wifi_hal_error_print("%s:%d invalid ssid length [%d], expected length is [0..63]\r\n",
-            __func__, __LINE__, len);
+        wifi_hal_error_print("%s:%d invalid ssid length [%d], expected length is [0..63]\r\n", __func__, __LINE__, len);
         return -1;
     }
-    for (int i = 0; i < len; i++) {
-        if (!((ssid[i] >= ' ') && (ssid[i] <= '~'))) {
-            wifi_hal_error_print("%s:%d: Invalid character %c in SSID\r\n", __func__, __LINE__,
-                ssid[i]);
-            return -1;
-        }
-    }
     strncpy(l_ssid, ssid, (len + 1));
+    wifi_hal_dbg_print("%s:%d vap[%d] ssid:%s nvram name:%s\r\n", __func__, __LINE__, vap_index, l_ssid, nvram_name);
     return 0;
 }
 
@@ -1570,6 +1832,7 @@ int platform_set_radio(wifi_radio_index_t index, wifi_radio_operationParam_t *op
     if (_platform_init_done != FALSE) {
         /* Check radio status and bring it up if _platform_init_done is true */
         platform_radio_up(index, TRUE);
+        platform_vap_enable_update(NULL, TRUE);
     }
 #endif /* CONFIG_IEEE80211BE && XB10_PORT */
     return 0;
@@ -1628,7 +1891,7 @@ static bool needs_conf_split_assoc_req(uint vap_index, int hostap_mgt_frame_ctrl
  * [in] hostap_mgt_frame_ctrl
  * [out] mbssid_num_frames
 */
-#if defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
 static bool needs_conf_mbssid_num_frames(uint vap_index, int hostap_mgt_frame_ctrl, int *mbssid_num_frames)
 {
     char interface_name[8] = { 0 };
@@ -1654,7 +1917,7 @@ static bool needs_conf_mbssid_num_frames(uint vap_index, int hostap_mgt_frame_ct
     }
     return false;
 }
-#endif // defined(XB10_PORT) || defined(SCXER10_PORT)
+#endif // defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
 
 static int platform_set_hostap_ctrl(wifi_radio_info_t *radio, uint vap_index, int enable)
 {
@@ -1662,9 +1925,9 @@ static int platform_set_hostap_ctrl(wifi_radio_info_t *radio, uint vap_index, in
     char buf[128] = { 0 };
     char interface_name[8] = { 0 };
     struct maclist *maclist = (struct maclist *)buf;
-#if defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
     int mbssid_num_frames = 1;
-#endif // defined(XB10_PORT) || defined(SCXER10_PORT)
+#endif // defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
     bool split_assoc_req_change = false;
     bool mbssid_num_frames_change = false;
 
@@ -1710,7 +1973,7 @@ static int platform_set_hostap_ctrl(wifi_radio_info_t *radio, uint vap_index, in
     }
 
     split_assoc_req_change = needs_conf_split_assoc_req(vap_index, enable, &assoc_ctrl);
-#if defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
     mbssid_num_frames_change = needs_conf_mbssid_num_frames(vap_index, enable, &mbssid_num_frames);
 #endif
     if (split_assoc_req_change == false && mbssid_num_frames_change == false) {
@@ -1741,7 +2004,7 @@ static int platform_set_hostap_ctrl(wifi_radio_info_t *radio, uint vap_index, in
         nvram_commit();
     }
 
-#if defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
     // supported by driver version 23.2.1
     if (wl_iovar_set(interface_name, "mbssid_num_frames", &mbssid_num_frames,
             sizeof(mbssid_num_frames)) < 0) {
@@ -1749,7 +2012,7 @@ static int platform_set_hostap_ctrl(wifi_radio_info_t *radio, uint vap_index, in
             __func__, __LINE__, mbssid_num_frames, interface_name, errno, strerror(errno));
         return RETURN_ERR;
     }
-#endif // defined(XB10_PORT) || defined(SCXER10_PORT)
+#endif // defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
 
 #if !(defined(CONFIG_IEEE80211BE) && defined(XB10_PORT) && defined(MLO_ENAB))
     if (wl_ioctl(interface_name, WLC_UP, NULL, 0) < 0) {
@@ -1760,7 +2023,132 @@ static int platform_set_hostap_ctrl(wifi_radio_info_t *radio, uint vap_index, in
 #endif
     return RETURN_OK;
 }
-#endif // defined(FEATURE_HOSTAP_MGMT_FRAME_CTRL)
+#endif // FEATURE_HOSTAP_MGMT_FRAME_CTRL
+
+#if defined(FEATURE_HOSTAP_MGMT_FRAME_CTRL)
+static void platform_rnr_update(wifi_radio_index_t r_index, wifi_vap_info_map_t *map)
+{
+    wifi_radio_info_t *radio = get_radio_by_rdk_index(r_index);
+    if (radio == NULL || map == NULL) {
+        return;
+    }
+
+    for (unsigned int index = 0; index < map->num_vaps; index++) {
+        if (map->vap_array[index].vap_mode != wifi_vap_mode_ap) {
+            continue;
+        }
+
+#if defined(CONFIG_IEEE80211BE) && defined(XB10_PORT) && defined(MLO_ENAB)
+        wifi_mld_common_info_t *mld_cmn = &(map->vap_array[index].u.bss_info.mld_info.common_info);
+#endif /* CONFIG_IEEE80211BE */
+
+        if ((radio->oper_param.band == WIFI_FREQUENCY_6_BAND
+#if defined(CONFIG_IEEE80211BE) && defined(XB10_PORT) && defined(MLO_ENAB)
+            || (mld_cmn->mld_enable && mld_cmn->mld_id < MAX_MLD_UNITS)
+#endif /* CONFIG_IEEE80211BE */
+            )) {
+            for (unsigned int radio_index = 0; radio_index < g_wifi_hal.num_radios; radio_index++) {
+                wifi_interface_info_t *interface_iter = NULL;
+                wifi_radio_info_t *radio_iter = get_radio_by_rdk_index(radio_index);
+
+                if (radio_iter == NULL) {
+                    continue;
+                }
+
+                hash_map_foreach(radio_iter->interface_map, interface_iter) {
+                    if (interface_iter->vap_info.vap_mode != wifi_vap_mode_ap ||
+                        !interface_iter->vap_info.u.bss_info.enabled ||
+                        !interface_iter->vap_info.u.bss_info.hostap_mgt_frame_ctrl ||
+                        interface_iter->vap_info.vap_index == map->vap_array[index].vap_index) {
+                        continue;
+                    }
+
+                    bool update_beacon = radio->oper_param.band == WIFI_FREQUENCY_6_BAND &&
+                        radio_iter->oper_param.band != WIFI_FREQUENCY_6_BAND;
+
+#if defined(CONFIG_IEEE80211BE) && defined(XB10_PORT) && defined(MLO_ENAB)
+                    update_beacon |= mld_cmn->mld_enable &&
+                        interface_iter->vap_info.u.bss_info.mld_info.common_info.mld_enable &&
+                        mld_cmn->mld_id == interface_iter->vap_info.u.bss_info.mld_info.common_info.mld_id;
+#endif /* CONFIG_IEEE80211BE */
+
+                    if (!update_beacon) {
+                        continue;
+                    }
+
+                    ieee802_11_set_beacon(&interface_iter->u.ap.hapd);
+                }
+            }
+        }
+    }
+}
+#endif /* FEATURE_HOSTAP_MGMT_FRAME_CTRL */
+
+#if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXF10_PORT) || \
+    defined(RDKB_ONE_WIFI_PROD) || defined(SCXER10_PORT) || defined(TCHCBRV2_PORT)
+// ToDo: Add Beacon rate NL support for HUB6
+
+int nl_set_beacon_rate_ioctl(int vap_index, int beacon_rate)
+{
+    struct nlattr *nlattr_vendor;
+    struct nl_msg *msg;
+    int ret = RETURN_ERR;
+    wifi_interface_info_t *interface;
+
+    interface = get_interface_by_vap_index(vap_index);
+    if (interface == NULL) {
+        wifi_hal_error_print("%s:%d: failed to get interface for vap index: %d\n", __func__,
+            __LINE__, vap_index);
+        return RETURN_ERR;
+    }
+
+    wifi_hal_dbg_print("%s:%d: Setting beacon rate %d for vap_index:%d\n", __func__, __LINE__,
+        beacon_rate, vap_index);
+
+    /* Per requirement on wifi_setApBeaconRate, user shall only select on of the following
+     * rate as beacon rate
+     * "1Mbps"; "5.5Mbps"; "6Mbps"; "2Mbps"; "11Mbps"; "12Mbps"; "24Mbps"*/
+    if (beacon_rate == 1 || beacon_rate == 2 || beacon_rate == 5.5 || beacon_rate == 6 ||
+        beacon_rate == 11 || beacon_rate == 12 || beacon_rate == 24) {
+        // BCM expects rate in 500 Kbps units (×2)
+        beacon_rate = beacon_rate * 2;
+        wifi_hal_dbg_print(
+            "%s:%d: Setting beacon rate to %d (in units of 500kbps) for vap_index:%d\n", __func__,
+            __LINE__, beacon_rate, vap_index);
+    } else {
+        wifi_hal_error_print("%s:%d: Invalid beacon rate:%d for vap_index:%d\n", __func__, __LINE__,
+            beacon_rate, vap_index);
+        return RETURN_ERR;
+    }
+
+    msg = nl80211_drv_vendor_cmd_msg(g_wifi_hal.nl80211_id, interface, 0, OUI_COMCAST,
+        RDK_VENDOR_NL80211_SUBCMD_SET_BEACON_RATE);
+    if (msg == NULL) {
+        wifi_hal_error_print("%s:%d: Failed to create NL command\n", __func__, __LINE__);
+        return RETURN_ERR;
+    }
+
+    nlattr_vendor = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA);
+
+    if (nla_put(msg, RDK_VENDOR_ATTR_BEACON_RATE, sizeof(beacon_rate), &beacon_rate) < 0) {
+        wifi_hal_error_print("%s:%d: Failed to put beacon rate attribute\n", __func__, __LINE__);
+        nlmsg_free(msg);
+        return RETURN_ERR;
+    }
+
+    nla_nest_end(msg, nlattr_vendor);
+
+    ret = nl80211_send_and_recv(msg, NULL, &beacon_rate, NULL, NULL);
+    if (ret != RETURN_OK) {
+        wifi_hal_error_print("%s:%d: failed to set beacon_rate=%d for vap_index=%d, err: %d (%s)\n",
+            __func__, __LINE__, beacon_rate, vap_index, errno, strerror(errno));
+        return RETURN_ERR;
+    }
+
+    return RETURN_OK;
+}
+#endif /* defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXF10_PORT)
+         || defined(RDKB_ONE_WIFI_PROD) || defined(SCXER10_PORT) || defined(TCHCBRV2_PORT) */
 
 int platform_create_vap(wifi_radio_index_t r_index, wifi_vap_info_map_t *map)
 {
@@ -1780,6 +2168,16 @@ int platform_create_vap(wifi_radio_index_t r_index, wifi_vap_info_map_t *map)
     memset(temp_buff, 0 ,sizeof(temp_buff));
     memset(param_name, 0 ,sizeof(param_name));
     memset(interface_name, 0, sizeof(interface_name));
+
+#if defined(CONFIG_IEEE80211BE) && defined(XB10_PORT) && defined(MLO_ENAB)
+    if (_platform_init_done == FALSE) {
+        if (is_mlo_radio(r_index))
+            mlo_init_map |= (1 << r_index);
+        if (mlo_init_map == mlo_radio_map) {
+            nl80211_send_mld_apply(NULL);
+        }
+    }
+#endif /* CONFIG_IEEE80211BE && XB10_PORT */
 
     for (index = 0; index < map->num_vaps; index++) {
 
@@ -1814,7 +2212,43 @@ int platform_create_vap(wifi_radio_index_t r_index, wifi_vap_info_map_t *map)
                 map->vap_array[index].u.bss_info.hostap_mgt_frame_ctrl);
             platform_set_hostap_ctrl(radio, map->vap_array[index].vap_index,
                 map->vap_array[index].u.bss_info.hostap_mgt_frame_ctrl);
-#endif // defined(FEATURE_HOSTAP_MGMT_FRAME_CTRL)
+#endif // FEATURE_HOSTAP_MGMT_FRAME_CTRL
+
+#if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXF10_PORT) || \
+    defined(RDKB_ONE_WIFI_PROD) || defined(SCXER10_PORT) || defined(TCHCBRV2_PORT)
+            // ToDo: Add Beacon rate NL support for HUB6
+            wifi_hal_dbg_print("%s:%d: beacon rate for vap_index:%d is %d\n", __func__, __LINE__,
+                map->vap_array[index].vap_index, map->vap_array[index].u.bss_info.beaconRate);
+            int beacon_rate = 0;
+            int current_beacon_rate = 0;
+            beacon_rate = convert_enum_beaconrate_to_int(
+                map->vap_array[index].u.bss_info.beaconRate);
+            wifi_hal_dbg_print("%s:%d: converted beacon rate for vap_index:%d is %d\n", __func__,
+                __LINE__, map->vap_array[index].vap_index, beacon_rate);
+            if (wl_iovar_getint(interface_name, "force_bcn_rspec", &current_beacon_rate) < 0) {
+                wifi_hal_error_print("%s:%d Failed to get current beacon rate for interface: %s\n", __func__, __LINE__,
+                    interface_name);
+            }
+
+            /* Deal with WL_RSPEC_RATE_MASK -> 0xff to be able to convert into int value (backward compativility)
+             * also divide by 2 since BCM stores rate in 500 Kbps units (×2) */
+            current_beacon_rate &= 0xff;
+            wifi_hal_dbg_print("%s:%d: current beacon rate for vap_index:%d is %d\n", __func__, __LINE__,
+                map->vap_array[index].vap_index, current_beacon_rate / 2);
+            if (beacon_rate != (current_beacon_rate / 2)) {
+                if (nl_set_beacon_rate_ioctl(map->vap_array[index].vap_index, beacon_rate) !=
+                    RETURN_OK) {
+                    wifi_hal_error_print("%s:%d: Failed to set beacon rate %d for vap_index:%d\n",
+                        __func__, __LINE__, beacon_rate, map->vap_array[index].vap_index);
+                    return RETURN_ERR;
+                }
+#if defined(FEATURE_HOSTAP_MGMT_FRAME_CTRL) && defined(CONFIG_IEEE80211BE) && defined(XB10_PORT) && defined(MLO_ENAB)
+                need_down = TRUE;
+#endif
+            }
+#endif /* defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXF10_PORT) 
+         || defined(RDKB_ONE_WIFI_PROD) || defined(SCXER10_PORT) || defined(TCHCBRV2_PORT) */
+
             prepare_param_name(param_name, interface_name, "_akm");
             memset(temp_buff, 0 ,sizeof(temp_buff));
             if (get_security_mode_str_from_int(map->vap_array[index].u.bss_info.security.mode, map->vap_array[index].vap_index, temp_buff) == RETURN_OK) {
@@ -1936,9 +2370,6 @@ int platform_create_vap(wifi_radio_index_t r_index, wifi_vap_info_map_t *map)
             prepare_param_name(param_name, interface_name, "_bcnprs_txpwr_offset");
             set_decimal_nvram_param(param_name, abs(map->vap_array[index].u.bss_info.mgmtPowerControl));
             wifi_setApManagementFramePowerControl(map->vap_array[index].vap_index, map->vap_array[index].u.bss_info.mgmtPowerControl);
-#if defined(CONFIG_IEEE80211BE) && defined(XB10_PORT) && defined(MLO_ENAB)
-            platform_mld_update(&map->vap_array[index]);
-#endif /* CONFIG_IEEE80211BE && XB10_PORT */
         } else if (map->vap_array[index].vap_mode == wifi_vap_mode_sta) {
 
             prepare_param_name(param_name, interface_name, "_akm");
@@ -1996,16 +2427,31 @@ int platform_create_vap(wifi_radio_index_t r_index, wifi_vap_info_map_t *map)
                 prepare_param_name(param_name, interface_name, "_wpa_psk");
                 set_string_nvram_param(param_name, map->vap_array[index].u.sta_info.security.u.key.key);
             }
-#if defined(CONFIG_IEEE80211BE) && defined(XB10_PORT) && defined(MLO_ENAB)
-            platform_mld_update(&map->vap_array[index]);
-#endif /* CONFIG_IEEE80211BE && XB10_PORT */
         }
+#if defined(CONFIG_IEEE80211BE) && defined(XB10_PORT) && defined(MLO_ENAB)
+        platform_mld_update(&map->vap_array[index]);
+#endif /* CONFIG_IEEE80211BE && XB10_PORT */
     }
 
-#if defined(FEATURE_HOSTAP_MGMT_FRAME_CTRL) && defined(CONFIG_IEEE80211BE) && defined(XB10_PORT) && defined(MLO_ENAB)
-    if (need_down)
+#if defined(CONFIG_IEEE80211BE) && defined(XB10_PORT) && defined(MLO_ENAB)
+#if defined(FEATURE_HOSTAP_MGMT_FRAME_CTRL)
+    if (need_down && _platform_init_done) {
+        /* Bring IF up only after platform init has completed.
+         * Keep IF down during initialization.
+         */
         platform_radio_up(r_index, TRUE);
-#endif /* FEATURE_HOSTAP_MGMT_FRAME_CTRL && CONFIG_IEEE80211BE && XB10_PORT */
+    }
+#endif /* FEATURE_HOSTAP_MGMT_FRAME_CTRL */
+
+    if (_platform_init_done)
+        platform_vap_enable_update(map, TRUE);		/* Bring all VAPs up, including MLDs */
+#endif /* CONFIG_IEEE80211BE && XB10_PORT */
+
+#if defined(FEATURE_HOSTAP_MGMT_FRAME_CTRL)
+    /* Update beacon info of neighboring APs*/
+    platform_rnr_update(r_index, map);
+#endif /* FEATURE_HOSTAP_MGMT_FRAME_CTRL */
+
     return 0;
 }
 
@@ -2295,8 +2741,8 @@ int platform_get_radio_phytemperature(wifi_radio_index_t index,
     return RETURN_OK;
 }
 
-#elif defined(SCXER10_PORT)
-
+#elif defined(SCXER10_PORT) || defined(SCXF10_PORT)
+/* Need to be re-examined for XF10 */
 int platform_get_radio_phytemperature(wifi_radio_index_t index,
     wifi_radioTemperature_t *radioPhyTemperature)
 {
@@ -2644,7 +3090,7 @@ int platform_get_vendor_oui(char *vendor_oui, int vendor_oui_len)
 }
 #endif /*_SR213_PRODUCT_REQ_ */
 
-#if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT)  || defined(RDKB_ONE_WIFI_PROD)
+#if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXF10_PORT) || defined(RDKB_ONE_WIFI_PROD)
 
 typedef struct sta_list {
     mac_address_t *macs;
@@ -3552,7 +3998,7 @@ INT wifi_getRadioTransmitPower(INT radioIndex, ULONG *tx_power)
     return wifi_hal_getRadioTransmitPower(radioIndex, tx_power);
 }
 
-#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || RDKB_ONE_WIFI_PROD
+#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || SCXF10_PORT || RDKB_ONE_WIFI_PROD
 
 int platform_set_dfs(wifi_radio_index_t index, wifi_radio_operationParam_t *operationParam)
 {
@@ -3570,7 +4016,7 @@ int platform_set_dfs(wifi_radio_index_t index, wifi_radio_operationParam_t *oper
 }
 
 #if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || \
-    defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT) || defined(RDKB_ONE_WIFI_PROD)
+    defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT) || defined(SCXF10_PORT) || defined(RDKB_ONE_WIFI_PROD)
 
 static int get_rates(char *ifname, int *rates, size_t rates_size, unsigned int *num_rates)
 {
@@ -3621,11 +4067,11 @@ static void platform_get_radio_caps_common(wifi_radio_info_t *radio,
 static void platform_get_radio_caps_2g(wifi_radio_info_t *radio, wifi_interface_info_t *interface)
 {
     // Set values from driver beacon, NL values are not valid.
-#if defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
     // SCS bit is not set in driver
     static const u8 ext_cap[] = { 0x85, 0x00, 0x08, 0x02, 0x01, 0x00, 0x40, 0x40, 0x00, 0x40,
         0x20 };
-#endif // XB10_PORT || SCXER10_PORT
+#endif // XB10_PORT || SCXER10_PORT || SCXF10_PORT
 #if defined(TCHCBRV2_PORT)
     static const u8 ext_cap[] = { 0x85, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00, 0x40, 0x00, 0x00,
         0x20 };
@@ -3636,28 +4082,29 @@ static void platform_get_radio_caps_2g(wifi_radio_info_t *radio, wifi_interface_
 #endif // SKYSR213_PORT
     static const u8 ht_mcs[16] = { 0xff, 0xff, 0xff, 0xff };
 #if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || \
-    defined(SKYSR213_PORT)
+    defined(SKYSR213_PORT) || defined(SCXF10_PORT) || defined(RDKB_ONE_WIFI_PROD)
     static const u8 he_mac_cap[HE_MAX_MAC_CAPAB_SIZE] = { 0x05, 0x00, 0x18, 0x12, 0x00, 0x10 };
-#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || SKYSR213_PORT
+#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || SKYSR213_PORT || SCXF10_PORT || RDKB_ONE_WIFI_PROD
 #if defined(TCHCBRV2_PORT)
     static const u8 he_mac_cap[HE_MAX_MAC_CAPAB_SIZE] = { 0x01, 0x00, 0x08, 0x12, 0x00, 0x10 };
 #endif // TCHCBRV2_PORT
 #if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || \
-    defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT)
+    defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT) || defined(SCXF10_PORT) || defined(RDKB_ONE_WIFI_PROD)
     static const u8 he_mcs[HE_MAX_MCS_CAPAB_SIZE] = { 0xaa, 0xff, 0xaa, 0xff };
     static const u8 he_ppet[HE_MAX_PPET_CAPAB_SIZE] = { 0x1b, 0x1c, 0xc7, 0x71, 0x1c, 0xc7, 0x71 };
-#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || TCHCBRV2_PORT || SKYSR213_PORT
-#if defined(TCXB7_PORT) || defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT)
+#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || TCHCBRV2_PORT ||
+       // SKYSR213_PORT || SCXF10_PORT || RDKB_ONE_WIFI_PROD
+#if defined(TCXB7_PORT) || defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT) || defined(RDKB_ONE_WIFI_PROD)
     static const u8 he_phy_cap[HE_MAX_PHY_CAPAB_SIZE] = { 0x22, 0x20, 0x02, 0xc0, 0x0f, 0x03, 0x95,
         0x18, 0x00, 0xcc, 0x00 };
-#endif // TCXB7_PORT || TCHCBRV2_PORT || SKYSR213_PORT
+#endif // TCXB7_PORT || TCHCBRV2_PORT || SKYSR213_PORT || RDKB_ONE_WIFI_PROD
 #if defined(XB10_PORT)
     static const u8 he_phy_cap[HE_MAX_PHY_CAPAB_SIZE] = { 0x22, 0x20, 0x42, 0xc0, 0x02, 0x03, 0x95,
         0x00, 0x00, 0xcc, 0x00 };
-#elif defined(TCXB8_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
+#elif defined(TCXB8_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT) || defined(RDKB_ONE_WIFI_PROD)
     static const u8 he_phy_cap[HE_MAX_PHY_CAPAB_SIZE] = { 0x22, 0x20, 0x02, 0xc0, 0x02, 0x03, 0x95,
         0x00, 0x00, 0xcc, 0x00 };
-#endif // TCXB8_PORT || SCXER10_PORT || SCXF10_PORT
+#endif // TCXB8_PORT || SCXER10_PORT || SCXF10_PORT || RDKB_ONE_WIFI_PROD
 #if defined(SCXER10_PORT)
     static const u8 eht_phy_cap[EHT_PHY_CAPAB_LEN] = { 0x2c, 0x00, 0x03, 0xe0, 0x00, 0xe7, 0x00,
         0x7e, 0x00 };
@@ -3669,7 +4116,8 @@ static void platform_get_radio_caps_2g(wifi_radio_info_t *radio, wifi_interface_
 
     radio->driver_data.capa.flags |= WPA_DRIVER_FLAGS_AP_UAPSD;
 
-#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT)
+#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT) || \
+    defined(SCXF10_PORT)
     free(radio->driver_data.extended_capa);
     radio->driver_data.extended_capa = malloc(sizeof(ext_cap));
     memcpy(radio->driver_data.extended_capa, ext_cap, sizeof(ext_cap));
@@ -3677,15 +4125,16 @@ static void platform_get_radio_caps_2g(wifi_radio_info_t *radio, wifi_interface_
     radio->driver_data.extended_capa_mask = malloc(sizeof(ext_cap));
     memcpy(radio->driver_data.extended_capa_mask, ext_cap, sizeof(ext_cap));
     radio->driver_data.extended_capa_len = sizeof(ext_cap);
-#endif // XB10_PORT || SCXER10_PORT || TCHCBRV2_PORT || SKYSR213_PORT
+#endif // XB10_PORT || SCXER10_PORT || TCHCBRV2_PORT || SKYSR213_PORT || SCXF10_PORT
 
 // To reset the bss transition bit under extended capabilities, since its based on 2GHz vap configuration from OneWiFi.
     if (radio->driver_data.extended_capa_len) {
         radio->driver_data.extended_capa_mask[2] &= 0xF7;
         radio->driver_data.extended_capa[2] &= 0xF7;
     }
+
     for (int i = 0; i < iface->num_hw_features; i++) {
-#if defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
         iface->hw_features[i].ht_capab = 0x19ef;
 #else
         iface->hw_features[i].ht_capab = 0x11ef;
@@ -3706,14 +4155,14 @@ static void platform_get_radio_caps_2g(wifi_radio_info_t *radio, wifi_interface_
 #endif // SCXER10_PORT
 
 #if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || \
-    defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT)
+    defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT) || defined(SCXF10_PORT) || defined(RDKB_ONE_WIFI_PROD)
         memcpy(iface->hw_features[i].he_capab[IEEE80211_MODE_AP].mac_cap, he_mac_cap,
             sizeof(he_mac_cap));
         memcpy(iface->hw_features[i].he_capab[IEEE80211_MODE_AP].phy_cap, he_phy_cap,
             sizeof(he_phy_cap));
         memcpy(iface->hw_features[i].he_capab[IEEE80211_MODE_AP].mcs, he_mcs, sizeof(he_mcs));
         memcpy(iface->hw_features[i].he_capab[IEEE80211_MODE_AP].ppet, he_ppet, sizeof(he_ppet));
-#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || TCHCBRV2_PORT || SKYSR213_PORT
+#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || TCHCBRV2_PORT || SKYSR213_PORT || SCXF10_PORT || RDKB_ONE_WIFI_PROD
 
         for (int ch = 0; ch < iface->hw_features[i].num_channels; ch++) {
             iface->hw_features[i].channels[ch].max_tx_power = 30; // dBm
@@ -3723,10 +4172,10 @@ static void platform_get_radio_caps_2g(wifi_radio_info_t *radio, wifi_interface_
 
 static void platform_get_radio_caps_5g(wifi_radio_info_t *radio, wifi_interface_info_t *interface)
 {
-#if defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
     static const u8 ext_cap[] = { 0x84, 0x00, 0x08, 0x02, 0x01, 0x00, 0x40, 0x40, 0x00, 0x40,
         0x20 };
-#endif // XB10_PORT || SCXER10_PORT
+#endif // XB10_PORT || SCXER10_PORT || SCXF10_PORT
 #if defined(TCHCBRV2_PORT)
     static const u8 ext_cap[] = { 0x84, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00, 0x40, 0x00, 0x40,
         0x20 };
@@ -3738,13 +4187,13 @@ static void platform_get_radio_caps_5g(wifi_radio_info_t *radio, wifi_interface_
     static const u8 ht_mcs[16] = { 0xff, 0xff, 0xff, 0xff };
     static const u8 vht_mcs[8] = { 0xaa, 0xff, 0x00, 0x00, 0xaa, 0xff, 0x00, 0x20 };
 #if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || \
-    defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT)
+    defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT) || defined(SCXF10_PORT)
     static const u8 he_mac_cap[HE_MAX_MAC_CAPAB_SIZE] = { 0x05, 0x00, 0x18, 0x12, 0x00, 0x10 };
     static const u8 he_mcs[HE_MAX_MCS_CAPAB_SIZE] = { 0xaa, 0xff, 0xaa, 0xff, 0xaa, 0xff, 0xaa,
         0xff };
     static const u8 he_ppet[HE_MAX_PPET_CAPAB_SIZE] = { 0x7b, 0x1c, 0xc7, 0x71, 0x1c, 0xc7, 0x71,
         0x1c, 0xc7, 0x71, 0x1c, 0xc7, 0x71 };
-#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || TCHCBRV2_PORT || SKYSR213_PORT
+#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || TCHCBRV2_PORT || SKYSR213_PORT || SCXF10_PORT
 #if defined(TCXB7_PORT) || defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT)
     static const u8 he_phy_cap[HE_MAX_PHY_CAPAB_SIZE] = { 0x4c, 0x20, 0x02, 0xc0, 0x6f, 0x1b, 0x95,
         0x18, 0x00, 0xcc, 0x00 };
@@ -3767,7 +4216,8 @@ static void platform_get_radio_caps_5g(wifi_radio_info_t *radio, wifi_interface_
 
     radio->driver_data.capa.flags |= WPA_DRIVER_FLAGS_AP_UAPSD | WPA_DRIVER_FLAGS_DFS_OFFLOAD;
 
-#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT)
+#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT) || \
+    defined(SCXF10_PORT)
     free(radio->driver_data.extended_capa);
     radio->driver_data.extended_capa = malloc(sizeof(ext_cap));
     memcpy(radio->driver_data.extended_capa, ext_cap, sizeof(ext_cap));
@@ -3783,11 +4233,11 @@ static void platform_get_radio_caps_5g(wifi_radio_info_t *radio, wifi_interface_
         radio->driver_data.extended_capa[2] &= 0xF7;
     }
     for (int i = 0; i < iface->num_hw_features; i++) {
-#if defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
         iface->hw_features[i].ht_capab = 0x09ef;
 #else
         iface->hw_features[i].ht_capab = 0x01ef;
-#endif // XB10_PORT || SCXER10_PORT
+#endif // XB10_PORT || SCXER10_PORT || SCXF10_PORT
         iface->hw_features[i].a_mpdu_params &= ~(0x07 << 2);
         iface->hw_features[i].a_mpdu_params |= 0x05 << 2;
         memcpy(iface->hw_features[i].mcs_set, ht_mcs, sizeof(ht_mcs));
@@ -3799,14 +4249,14 @@ static void platform_get_radio_caps_5g(wifi_radio_info_t *radio, wifi_interface_
         memcpy(iface->hw_features[i].vht_mcs_set, vht_mcs, sizeof(vht_mcs));
 
 #if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || \
-    defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT)
+    defined(TCHCBRV2_PORT) || defined(SKYSR213_PORT) || defined(SCXF10_PORT)
         memcpy(iface->hw_features[i].he_capab[IEEE80211_MODE_AP].mac_cap, he_mac_cap,
             sizeof(he_mac_cap));
         memcpy(iface->hw_features[i].he_capab[IEEE80211_MODE_AP].phy_cap, he_phy_cap,
             sizeof(he_phy_cap));
         memcpy(iface->hw_features[i].he_capab[IEEE80211_MODE_AP].mcs, he_mcs, sizeof(he_mcs));
         memcpy(iface->hw_features[i].he_capab[IEEE80211_MODE_AP].ppet, he_ppet, sizeof(he_ppet));
-#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || TCHCBRV2_PORT || SKYSR213_PORT
+#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || TCHCBRV2_PORT || SKYSR213_PORT || SCXF10_PORT
 
 // XER-10 uses old kernel that does not support EHT cap NL parameters
 #if defined(SCXER10_PORT)
@@ -3837,11 +4287,12 @@ static void platform_get_radio_caps_5g(wifi_radio_info_t *radio, wifi_interface_
 
 static void platform_get_radio_caps_6g(wifi_radio_info_t *radio, wifi_interface_info_t *interface)
 {
-#if defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
     static const u8 ext_cap[] = { 0x84, 0x00, 0x48, 0x02, 0x01, 0x00, 0x40, 0x40, 0x00, 0x40,
         0x21 };
-#endif // XB10_PORT || SCXER10_PORT
-#if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT)
+#endif // XB10_PORT || SCXER10_PORT || SCXF10_PORT
+#if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || \
+    defined(SCXF10_PORT)
     static const u8 he_mac_cap[HE_MAX_MAC_CAPAB_SIZE] = { 0x05, 0x00, 0x18, 0x12, 0x00, 0x10 };
 #if defined(XB10_PORT)
     static const u8 he_phy_cap[HE_MAX_PHY_CAPAB_SIZE] = { 0x4c, 0x20, 0x42, 0xc0, 0x02, 0x1b, 0x95,
@@ -3854,7 +4305,7 @@ static void platform_get_radio_caps_6g(wifi_radio_info_t *radio, wifi_interface_
         0xff };
     static const u8 he_ppet[HE_MAX_PPET_CAPAB_SIZE] = { 0x7b, 0x1c, 0xc7, 0x71, 0x1c, 0xc7, 0x71,
         0x1c, 0xc7, 0x71, 0x1c, 0xc7, 0x71 };
-#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT
+#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || SCXF10_PORT
 #if defined(SCXER10_PORT)
     static const u8 eht_phy_cap[EHT_PHY_CAPAB_LEN] = { 0x2e, 0x00, 0x00, 0x60, 0x00, 0xe7, 0x00,
         0x0e, 0x00 };
@@ -3863,8 +4314,9 @@ static void platform_get_radio_caps_6g(wifi_radio_info_t *radio, wifi_interface_
     static const u8 eht_mcs[] = { 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44 };
 #endif /* HOSTAPD_VERSION >= 211 */
     struct hostapd_iface *iface = &interface->u.ap.iface;
+    radio->driver_data.capa.flags |= WPA_DRIVER_FLAGS_AP_UAPSD;
 
-#if defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(XB10_PORT) || defined(SCXER10_PORT) || defined(SCXF10_PORT)
     free(radio->driver_data.extended_capa);
     radio->driver_data.extended_capa = malloc(sizeof(ext_cap));
     memcpy(radio->driver_data.extended_capa, ext_cap, sizeof(ext_cap));
@@ -3872,7 +4324,7 @@ static void platform_get_radio_caps_6g(wifi_radio_info_t *radio, wifi_interface_
     radio->driver_data.extended_capa_mask = malloc(sizeof(ext_cap));
     memcpy(radio->driver_data.extended_capa_mask, ext_cap, sizeof(ext_cap));
     radio->driver_data.extended_capa_len = sizeof(ext_cap);
-#endif // XB10_PORT || SCXER10_PORT
+#endif // XB10_PORT || SCXER10_PORT || SCXF10_PORT
 
 // To reset the bss transition bit under extended capabilities, since its based on 6GHz vap configuration from OneWiFi.
     if (radio->driver_data.extended_capa_len) {
@@ -3880,7 +4332,8 @@ static void platform_get_radio_caps_6g(wifi_radio_info_t *radio, wifi_interface_
         radio->driver_data.extended_capa[2] &= 0xF7;
     }
     for (int i = 0; i < iface->num_hw_features; i++) {
-#if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT)
+#if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT) || defined(SCXER10_PORT) || \
+    defined(SCXF10_PORT)
         memcpy(iface->hw_features[i].he_capab[IEEE80211_MODE_AP].mac_cap, he_mac_cap,
             sizeof(he_mac_cap));
         memcpy(iface->hw_features[i].he_capab[IEEE80211_MODE_AP].phy_cap, he_phy_cap,
@@ -3943,6 +4396,18 @@ int platform_get_radio_caps(wifi_radio_index_t index)
                     EHT_ML_MLD_CAPA_TID_TO_LINK_MAP_ALL_TO_ONE) |
                 ((0 << 4) & EHT_ML_MLD_CAPA_SRS_SUPP) |
                 ((MAX_NUM_MLD_LINKS - 1) & EHT_ML_MLD_CAPA_MAX_NUM_SIM_LINKS_MASK));
+
+    /* FIXME: NSTR capability disabled by default */
+    if (radio->driver_data.iface_ext_capa[NL80211_IFTYPE_UNSPECIFIED].eml_capa
+        & EHT_ML_EML_CAPA_EMLMR_SUPP)
+        radio->capab.mldOperationalCap |= eMLMR;
+    if (radio->driver_data.iface_ext_capa[NL80211_IFTYPE_UNSPECIFIED].eml_capa
+        & EHT_ML_EML_CAPA_EMLSR_SUPP)
+        radio->capab.mldOperationalCap |= eMLSR;
+    if ((radio->driver_data.iface_ext_capa[NL80211_IFTYPE_UNSPECIFIED].mld_capa_and_ops
+        & EHT_ML_MLD_CAPA_MAX_NUM_SIM_LINKS_MASK) > 0)
+        radio->capab.mldOperationalCap |= STR;
+
 #endif /* CONFIG_IEEE80211BE */
 
     for (interface = hash_map_get_first(radio->interface_map); interface != NULL;
@@ -3972,8 +4437,8 @@ int platform_get_radio_caps(wifi_radio_index_t index)
 {
     return RETURN_OK;
 }
-#endif /* TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || TCHCBRV2_PORT || SKYSR213_PORT 
-          RDKB_ONE_WIFI_PROD */
+#endif // TCXB7_PORT || TCXB8_PORT || XB10_PORT || SCXER10_PORT || TCHCBRV2_PORT || SKYSR213_PORT ||
+       // SCXF10_PORT || RDKB_ONE_WIFI_PROD
 
 int platform_get_reg_domain(wifi_radio_index_t radioIndex, UINT *reg_domain)
 {
@@ -4007,10 +4472,13 @@ static bool platform_is_eht_enabled(wifi_radio_index_t index)
     return (eht[0] == '1') ? true : false;
 }
 
-static void platform_set_eht_hal_callback(wifi_interface_info_t *interface)
+bool platform_set_eht_hal_callback(wifi_interface_info_t *interface)
 {
     wifi_hal_dbg_print("%s:%d EHT completed for %s\n", __func__, __LINE__, interface->name);
-    l_eht_set = true;
+
+    l_eht_set = (--l_eht_interface_count <= 0) ? true : false;
+
+    return l_eht_set;
 }
 
 static void platform_wait_for_eht(void)
@@ -4027,6 +4495,18 @@ static void platform_wait_for_eht(void)
     return;
 }
 
+static void platform_create_bss_states_string(wifi_radio_index_t index, char *cmd, size_t size)
+{
+    int bss;
+    int len = 0;
+
+    memset(cmd, 0, size);
+    len = snprintf(cmd, size, "wl -i wl%d bss", index);
+    for (bss = 1; bss <= 7; bss++) {
+        len += snprintf(&cmd[len], size-len, "; wl -i wl%d.%d bss", index, bss);
+    }
+}
+
 static void platform_set_eht(wifi_radio_index_t index, bool enable)
 {
     bool eht_enabled;
@@ -4038,10 +4518,29 @@ static void platform_set_eht(wifi_radio_index_t index, bool enable)
         return;
     }
 
+    l_eht_interface_count = 0;
     radio_up = platform_radio_state(index);
     if (radio_up) {
+        FILE *fp;
+        char bss_state[16]={'\0'};
+        char cmd[256];
+
+        l_eht_interface_count = 0;
+        platform_create_bss_states_string(index, &cmd[0], sizeof(cmd));
+        fp = (FILE *)v_secure_popen("r", cmd);
+        if (fp) {
+            while (fgets(bss_state, sizeof(bss_state), fp)) {
+                if (!strncmp(bss_state, "up", 2)) {
+                    l_eht_interface_count++;
+                }
+            }
+            v_secure_pclose(fp);
+        }
+        wifi_hal_dbg_print("%s: total number of BSS up is %d\n", __func__, l_eht_interface_count);
+
         v_secure_system("wl -i wl%d down", index);
     }
+
     v_secure_system("wl -i wl%d eht %d", index, (enable) ? 1 : 0);
     v_secure_system("wl -i wl%d eht bssehtmode %d", index, (enable) ? 1 : 0);
     for (bss = 1; bss <= 7; bss++) {
@@ -4050,12 +4549,16 @@ static void platform_set_eht(wifi_radio_index_t index, bool enable)
     wifi_hal_dbg_print("%s: wl%d eht changed to %d\n", __func__, index, (enable == true) ? 1 : 0);
     if (radio_up) {
         l_eht_set = false;
-        g_eht_oneshot_notify = platform_set_eht_hal_callback;
-        v_secure_system("wl -i wl%d up", index);
-        platform_wait_for_eht();
+        if (l_eht_interface_count) {
+            g_eht_event_notify = platform_set_eht_hal_callback;
+            v_secure_system("wl -i wl%d up", index);
+            platform_wait_for_eht();
+        } else {
+            v_secure_system("wl -i wl%d up", index);
+        }
     }
 
-    g_eht_oneshot_notify = NULL;
+    g_eht_event_notify = NULL;
 
     return;
 }
@@ -4067,7 +4570,7 @@ int platform_set_amsdu_tid(wifi_interface_info_t *interface, uint8_t *amsdu_tid)
         {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
         {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}};
 
-    int radio_index = interface->vap_info.radio_index;
+    int radio_index = interface->rdk_radio_index;
 
     for (int index = 0; index < RDK_VENDOR_NL80211_AMSDU_TID_MAX; index++) {
         /* minimize the calling of wl if same value */
@@ -4339,15 +4842,16 @@ int nl80211_drv_mlo_msg(struct nl_msg *msg, struct nl_msg **msg_mlo, void *priv,
     *msg_mlo = NULL;
 
 /*
- *  `SERCOMMXER10` does not support the nl mlo vendor commands.
+ *  Currently only 'XB10_PORT' support the nl mlo vendor commands.
  */
-#ifndef SCXER10_PORT
+#if defined(CONFIG_IEEE80211BE) && defined(XB10_PORT) && defined(MLO_ENAB)
     wifi_interface_info_t *interface;
     struct hostapd_bss_config *conf;
     struct hostapd_data *hapd;
     struct nlattr *nlattr_vendor;
-    mac_addr_str_t mld_addr = {};
+    mac_addr_str_t mld_addr = {0};
     unsigned char apply;
+    unsigned char mld_enable, set_mld_mac = FALSE;
 
     interface = (wifi_interface_info_t *)priv;
     conf = &interface->u.ap.conf;
@@ -4378,34 +4882,20 @@ int nl80211_drv_mlo_msg(struct nl_msg *msg, struct nl_msg **msg_mlo, void *priv,
         (void)to_mac_str(hapd->mld->mld_addr, mld_addr);
     }
 
-    /*
-     * NOTE: The BRCM driver does not support MLO reconfiguration and even sending the same message
-     * to the module twice.
-     */
-#ifndef CONFIG_NO_MLD_DETECT_DOUBLE_APPLY
-    char fname_buff[32 + sizeof("/tmp/.mld_")];
-    int fd;
-    snprintf(fname_buff, sizeof(fname_buff), "/tmp/.mld_%s", conf->iface);
-    if ((fd = open(fname_buff, O_WRONLY | O_CREAT | O_EXCL, 0)) == -1) {
-        wifi_hal_dbg_print("%s:%d skip double apply for the iface:%s:\n", __func__, __LINE__,
-            conf->iface);
-        return 0;
-    }
-    close(fd);
-#endif /* CONFIG_NO_MLD_DOUBLE_APPLY */
+    apply = (_platform_init_done) ? TRUE : FALSE;
+    mld_enable = (params->mld_ap && get_mld_unit(conf) < MAX_MLD_UNITS) ? 1 : 0;
 
     /*
-     * !FIXME: need to look for the last active VAP.
-     *
-     * NOTE: We cannot iterate over `interface_map` because this collection `hash_map t` has a
-     * stateful iterator and any call to `hash_map_get_first` under the loop of this collection
-     * instance invalidates the top-level iterator.
+     * The mld mac address, if given, must be either
+     * 1. The link address of the MAP's.
+     * 2. A complete different address from other AAPs' link addresses.
      */
-    apply = is_wifi_hal_6g_radio_from_interfacename(conf->iface);
+    if (params->mld_ap && params->mld_link_id == 0 && !is_zero_ether_addr(hapd->mld->mld_addr))
+        set_mld_mac = TRUE;
 
     wifi_hal_dbg_print(
-        "%s:%d iface:%s - mld_ap:%d mld_unit:%u mld_link_id:%u mld_addr:%s apply:%d\n", __func__,
-        __LINE__, conf->iface, params->mld_ap, get_mld_unit(conf), params->mld_link_id, mld_addr,
+        "%s:%d iface:%s - mld_ap:%d mld_enab:%d mld_unit:%u mld_link_id:%u mld_addr:%s apply:%d\n", __func__,
+        __LINE__, conf->iface, params->mld_ap, mld_enable, get_mld_unit(conf), params->mld_link_id, mld_addr,
         apply);
 
     /*
@@ -4421,11 +4911,11 @@ int nl80211_drv_mlo_msg(struct nl_msg *msg, struct nl_msg **msg_mlo, void *priv,
     if ((*msg_mlo = nl80211_drv_vendor_cmd_msg(g_wifi_hal.nl80211_id, interface, 0, OUI_COMCAST,
              RDK_VENDOR_NL80211_SUBCMD_SET_MLD)) == NULL ||
         (nlattr_vendor = nla_nest_start(*msg_mlo, NL80211_ATTR_VENDOR_DATA)) == NULL ||
-        nla_put_u8(*msg_mlo, RDK_VENDOR_ATTR_MLD_ENABLE, params->mld_ap) < 0 ||
+        nla_put_u8(*msg_mlo, RDK_VENDOR_ATTR_MLD_ENABLE, mld_enable) < 0 ||
         (params->mld_ap ?
                 (nla_put_u8(*msg_mlo, RDK_VENDOR_ATTR_MLD_UNIT, get_mld_unit(conf)) < 0 ||
                     nla_put_u8(*msg_mlo, RDK_VENDOR_ATTR_MLD_LINK_ID, params->mld_link_id) < 0 ||
-                    (!is_zero_ether_addr(hapd->mld->mld_addr) &&
+                    (set_mld_mac &&
                         nla_put(*msg_mlo, RDK_VENDOR_ATTR_MLD_MAC, ETH_ALEN, hapd->mld->mld_addr) <
                             0)) :
                 0) ||
@@ -4435,7 +4925,7 @@ int nl80211_drv_mlo_msg(struct nl_msg *msg, struct nl_msg **msg_mlo, void *priv,
         return -1;
     }
     nla_nest_end(*msg_mlo, nlattr_vendor);
-#endif /* SCXER10_PORT */
+#endif /* defined(CONFIG_IEEE80211BE) && defined(XB10_PORT) && defined(MLO_ENAB) */
 
     return 0;
 }
@@ -4753,8 +5243,10 @@ int update_hostap_mlo(wifi_interface_info_t *interface)
 #endif
     mld_conf = &vap->u.bss_info.mld_info.common_info;
     nvram_update_wl_mlo_apply(conf->iface, mld_conf->mld_apply, &nvram_changed);
-    nvram_update_wl_mlo_config(vap->radio_index, !conf->disable_11be ? mld_conf->mld_link_id : -1,
-        &nvram_changed);
+
+    nvram_update_wl_mlo_config(vap->radio_index,
+        mld_conf->mld_link_id < MAX_NUM_MLD_LINKS ? mld_conf->mld_link_id : -1, &nvram_changed);
+
     old_mld_link_id = hapd->mld_link_id;
     hapd->mld_link_id = platform_get_link_id_for_radio_index(vap->radio_index, vap->vap_index);
     mld_ap = (!conf->disable_11be && (hapd->mld_link_id < MAX_NUM_MLD_LINKS));
