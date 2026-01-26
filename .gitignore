@@ -2,3 +2,17 @@ install/
 *.o
 *.so
 .vscode/
+
+# Build artifacts
+autom4te.cache/
+aclocal.m4
+compile
+config.guess
+config.h.in
+config.sub
+configure
+install-sh
+ltmain.sh
+m4/
+missing
+_codeql_detected_source_root
