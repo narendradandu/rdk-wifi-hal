@@ -1222,6 +1222,8 @@ int platform_post_init(wifi_vap_info_map_t *vap_map)
         }
     }
 
+    system("wl -p taf bypass 1");
+
     return 0;
 }
 
